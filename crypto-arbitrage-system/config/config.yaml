@@ -1,0 +1,72 @@
+# Crypto Arbitrage System Configuration
+
+trading:
+  mode: paper  # paper | live
+  min_spread_percent: 0.3
+  max_spread_percent: 10.0  # Reject suspiciously high spreads
+  max_position_usd: 500
+  max_daily_trades: 20
+  max_daily_loss_usd: 100
+  order_timeout_seconds: 30
+  max_slippage_bps: 50  # Basis points
+  
+exchanges:
+  binance:
+    enabled: true
+    taker_fee: 0.001  # 0.1%
+    maker_fee: 0.001
+    priority: 1
+  coinbase:
+    enabled: true
+    taker_fee: 0.006  # 0.6%
+    maker_fee: 0.004
+    priority: 2
+  kraken:
+    enabled: true
+    taker_fee: 0.0026  # 0.26%
+    maker_fee: 0.0016
+    priority: 3
+
+symbols:
+  - BTC/USDT
+  - ETH/USDT
+
+monitoring:
+  prometheus_enabled: true
+  prometheus_port: 8000
+  telegram_alerts: true
+  alert_on_opportunity: true
+  alert_on_execution: true
+  alert_on_error: true
+  
+performance:
+  check_interval_seconds: 2
+  orderbook_cache_ttl_seconds: 1
+  balance_update_interval_seconds: 30
+  max_concurrent_opportunities: 3
+  websocket_reconnect_delay_seconds: 5
+  
+risk_management:
+  enabled: true
+  daily_loss_limit_usd: 100
+  max_position_percent: 50  # % of available balance
+  require_both_balances: true  # Must have balance on both exchanges
+  min_balance_usd: 50
+
+logging:
+  level: INFO  # DEBUG | INFO | WARNING | ERROR | CRITICAL
+  format: json  # json | text
+  file_enabled: true
+  file_path: data/logs/arbitrage.log
+  max_file_size_mb: 100
+  backup_count: 5
+
+database:
+  pool_min_size: 2
+  pool_max_size: 10
+  command_timeout: 60
+  
+redis:
+  max_connections: 10
+  socket_timeout: 5
+  socket_connect_timeout: 5
