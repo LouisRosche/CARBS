@@ -12,6 +12,10 @@ class TradingConfig:
     min_spread_percent: float
     max_spread_percent: float
     max_position_usd: float
+    max_daily_loss_usd: float = 100.0
+    max_daily_trades: int = 20
+    order_timeout_seconds: int = 30
+    max_slippage_bps: int = 50
 
 @dataclass  
 class Config:

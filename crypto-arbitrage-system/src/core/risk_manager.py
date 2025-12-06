@@ -18,7 +18,7 @@ Research References:
 
 import asyncio
 from decimal import Decimal
-from typing import Dict, List, Optional, Deque
+from typing import Dict, List, Optional, Deque, Tuple
 from dataclasses import dataclass, field
 from datetime import datetime, timezone, timedelta
 from collections import deque
