@@ -10,13 +10,17 @@ from pathlib import Path
 from core.engine import ArbitrageEngine
 from config.settings import load_config
 
+# Ensure log directory exists
+log_dir = Path('data/logs')
+log_dir.mkdir(parents=True, exist_ok=True)
+
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
         logging.StreamHandler(sys.stdout),
-        logging.FileHandler('data/logs/arbitrage.log')
+        logging.FileHandler(log_dir / 'arbitrage.log')
     ]
 )
 

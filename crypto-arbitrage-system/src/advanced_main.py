@@ -31,13 +31,17 @@ from utils.cache import RedisCache
 from utils.metrics import MetricsCollector
 from config.settings import load_config
 
+# Ensure log directory exists
+log_dir = Path('data/logs')
+log_dir.mkdir(parents=True, exist_ok=True)
+
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
         logging.StreamHandler(sys.stdout),
-        logging.FileHandler('data/logs/arbitrage.log')
+        logging.FileHandler(log_dir / 'arbitrage.log')
     ]
 )
 
@@ -130,7 +134,14 @@ class AdvancedArbitrageBot:
         cached = await self.cache.get(cache_key)
         if cached:
             self.metrics.increment('orderbook_cache_hits')
-            return EnhancedOrderBook(**cached)
+            # Reconstruct Decimal and datetime from cached strings
+            return EnhancedOrderBook(
+                exchange=cached['exchange'],
+                symbol=cached['symbol'],
+                timestamp=datetime.fromisoformat(cached['timestamp']),
+                bids=[(Decimal(p), Decimal(v)) for p, v in cached['bids']],
+                asks=[(Decimal(p), Decimal(v)) for p, v in cached['asks']]
+            )
 
         try:
             exchange = self.exchanges[exchange_name]
