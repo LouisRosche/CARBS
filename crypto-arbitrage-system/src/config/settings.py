@@ -63,7 +63,8 @@ DEFAULT_MONITORING = {
 DEFAULT_PERFORMANCE = {
     "cache_ttl_seconds": 60,
     "max_concurrent_requests": 10,
-    "rate_limit_per_second": 5
+    "rate_limit_per_second": 5,
+    "check_interval_seconds": 1
 }
 
 DEFAULT_RISK_MANAGEMENT = {

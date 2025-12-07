@@ -8,7 +8,7 @@ import sys
 from pathlib import Path
 
 from core.engine import ArbitrageEngine
-from config.settings import load_config
+from config.settings import load_config, ConfigLoadError, ConfigValidationError
 
 # Ensure log directory exists
 log_dir = Path('data/logs')
@@ -35,20 +35,29 @@ class ArbitrageBot:
     async def start(self):
         """Start the arbitrage bot"""
         try:
-            # Load configuration
-            config = load_config()
-            
+            # Load configuration with proper error handling
+            try:
+                config = load_config()
+            except ConfigLoadError as e:
+                logger.error(f"Failed to load configuration: {e}")
+                raise SystemExit(1)
+            except ConfigValidationError as e:
+                logger.error(f"Invalid configuration: {e}")
+                raise SystemExit(1)
+
             # Initialize engine
             self.engine = ArbitrageEngine(config)
-            
+
             # Setup signal handlers
             loop = asyncio.get_running_loop()
             for sig in (signal.SIGTERM, signal.SIGINT):
                 loop.add_signal_handler(sig, lambda: asyncio.create_task(self.stop()))
-            
+
             # Run engine
             await self.engine.run()
-            
+
+        except SystemExit:
+            raise
         except Exception as e:
             logger.error(f"Fatal error: {e}", exc_info=True)
             raise

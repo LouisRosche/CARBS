@@ -30,7 +30,7 @@ from core.state_manager import StateManager, get_state_manager
 from database.connection import DatabasePool
 from utils.cache import RedisCache
 from utils.metrics import MetricsCollector
-from config.settings import load_config
+from config.settings import load_config, ConfigLoadError, ConfigValidationError
 
 # Import optional modules with graceful fallbacks
 try:
@@ -118,8 +118,15 @@ class AdvancedArbitrageBot:
         """Initialize all components"""
         logger.info("🚀 Initializing Advanced Arbitrage Bot...")
 
-        # Load configuration
-        self.config = load_config()
+        # Load configuration with proper error handling
+        try:
+            self.config = load_config()
+        except ConfigLoadError as e:
+            logger.error(f"Failed to load configuration: {e}")
+            raise SystemExit(1)
+        except ConfigValidationError as e:
+            logger.error(f"Invalid configuration: {e}")
+            raise SystemExit(1)
 
         # Initialize state manager first for cross-component communication
         self.state_manager = get_state_manager()
@@ -673,7 +680,7 @@ class AdvancedArbitrageBot:
         """Continuously monitor one symbol"""
         logger.info(f"👀 Monitoring {symbol}...")
 
-        check_interval = self.config.performance['check_interval_seconds']
+        check_interval = self.config.performance.get('check_interval_seconds', 1)
 
         while self.running:
             try:
