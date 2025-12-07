@@ -34,6 +34,13 @@ from security.audit import get_audit_logger, AuditCategory
 from security.encryption import SecretsManager
 from .middleware import SecurityMiddleware, RateLimiter
 
+# Import state manager for real-time data
+try:
+    from core.state_manager import StateManager, get_state_manager
+    STATE_MANAGER_AVAILABLE = True
+except ImportError:
+    STATE_MANAGER_AVAILABLE = False
+
 logger = logging.getLogger(__name__)
 
 
@@ -74,6 +81,7 @@ _auth_manager: Optional[AuthenticationManager] = None
 _access_control: Optional[AccessControl] = None
 _emergency_controls: Optional[EmergencyControls] = None
 _security_middleware: Optional[SecurityMiddleware] = None
+_state_manager: Optional['StateManager'] = None
 _start_time: float = time.time()
 
 
@@ -87,7 +95,7 @@ def create_app() -> 'FastAPI':
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         """Application lifespan management"""
-        global _auth_manager, _access_control, _emergency_controls, _security_middleware, _start_time
+        global _auth_manager, _access_control, _emergency_controls, _security_middleware, _state_manager, _start_time
 
         logger.info("Starting CARBS API server...")
 
@@ -101,6 +109,17 @@ def create_app() -> 'FastAPI':
             audit_logger=get_audit_logger()
         )
         _start_time = time.time()
+
+        # Initialize state manager for real-time data
+        if STATE_MANAGER_AVAILABLE:
+            try:
+                _state_manager = get_state_manager()
+                logger.info("State manager connected")
+            except Exception as e:
+                logger.warning(f"State manager not available: {e}")
+                _state_manager = None
+        else:
+            logger.warning("State manager module not available")
 
         logger.info("API server started")
         yield
@@ -280,6 +299,20 @@ def _register_routes(app: 'FastAPI'):
         """Get system status"""
         emergency_status = _emergency_controls.get_emergency_status() if _emergency_controls else {}
 
+        # Get real data from state manager if available
+        if _state_manager:
+            trading_state = _state_manager.get_trading_state()
+            return StatusResponse(
+                status="running" if trading_state.running else "stopped",
+                mode=trading_state.mode,
+                emergency_stop=trading_state.emergency_stop or emergency_status.get('is_active', False),
+                uptime_seconds=int(time.time() - _start_time),
+                opportunities_detected=trading_state.opportunities_detected,
+                opportunities_executed=trading_state.opportunities_executed,
+                total_profit=float(trading_state.total_profit)
+            )
+
+        # Fallback to defaults
         return StatusResponse(
             status="running",
             mode="paper",
@@ -289,6 +322,37 @@ def _register_routes(app: 'FastAPI'):
             opportunities_executed=0,
             total_profit=0.0
         )
+
+    # Extended status with more details
+    @app.get("/api/v1/status/full")
+    async def get_full_status(session=Depends(get_current_user)):
+        """Get extended system status with all metrics"""
+        if _state_manager:
+            return _state_manager.get_dashboard_data()
+
+        return {
+            "status": "running",
+            "mode": "paper",
+            "message": "State manager not available"
+        }
+
+    # Recent trades endpoint
+    @app.get("/api/v1/trades/recent")
+    async def get_recent_trades(limit: int = 20, session=Depends(get_current_user)):
+        """Get recent trades"""
+        if _state_manager:
+            return {"trades": _state_manager.get_recent_trades(limit=limit)}
+
+        return {"trades": []}
+
+    # Recent opportunities endpoint
+    @app.get("/api/v1/opportunities/recent")
+    async def get_recent_opportunities(limit: int = 20, session=Depends(get_current_user)):
+        """Get recent opportunities"""
+        if _state_manager:
+            return {"opportunities": _state_manager.get_recent_opportunities(limit=limit)}
+
+        return {"opportunities": []}
 
     # Emergency controls
     @app.post("/api/v1/emergency/stop")

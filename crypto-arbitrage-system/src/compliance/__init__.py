@@ -888,13 +888,121 @@ class GDPRCompliance:
                 "trades": [],
                 "audit_logs": [],
                 "settings": {},
-                "sessions": []
+                "sessions": [],
+                "portfolio_snapshots": [],
+                "login_history": [],
+                "api_access_logs": []
             }
         }
 
-        # TODO: Collect actual data from various modules
-        # This is a framework - actual implementation would query
-        # the auth manager, trade journal, audit logger, etc.
+        # Collect actual data from various modules
+        try:
+            # 1. Collect trade history from trade journal
+            trade_journal_path = self.data_dir / "journal" / f"{user_id}_trades.json"
+            if trade_journal_path.exists():
+                async with aiofiles.open(trade_journal_path, 'r') as f:
+                    content = await f.read()
+                    user_data["data_categories"]["trades"] = json.loads(content)
+
+            # 2. Collect audit logs from audit system
+            try:
+                from security.audit import get_audit_logger, AuditCategory
+                audit_logger = get_audit_logger()
+                if audit_logger:
+                    user_events = audit_logger.query(actor=user_id, limit=10000)
+                    user_data["data_categories"]["audit_logs"] = [
+                        {
+                            "timestamp": e.timestamp.isoformat(),
+                            "category": e.category.value if hasattr(e.category, 'value') else str(e.category),
+                            "action": e.action,
+                            "resource": e.resource,
+                            "success": e.success
+                        }
+                        for e in user_events
+                    ]
+            except ImportError:
+                logger.warning("Audit logger not available for GDPR export")
+
+            # 3. Collect user settings
+            settings_path = self.data_dir / "settings" / f"{user_id}_settings.json"
+            if settings_path.exists():
+                async with aiofiles.open(settings_path, 'r') as f:
+                    content = await f.read()
+                    user_data["data_categories"]["settings"] = json.loads(content)
+
+            # 4. Collect session history from auth system
+            try:
+                from security.auth import AuthenticationManager
+                auth_mgr = AuthenticationManager()
+                user = auth_mgr.get_user(user_id)
+                if user:
+                    user_data["data_categories"]["sessions"] = [
+                        {
+                            "created_at": s.created_at.isoformat() if s.created_at else None,
+                            "expires_at": s.expires_at.isoformat() if s.expires_at else None,
+                            "ip_address": s.ip_address,
+                            "user_agent": s.user_agent
+                        }
+                        for s in auth_mgr._sessions.values()
+                        if s.username == user_id
+                    ]
+                    # Include basic profile (without sensitive auth data)
+                    user_data["data_categories"]["profile"] = {
+                        "username": user.username,
+                        "role": user.role,
+                        "created_at": user.created_at.isoformat() if user.created_at else None,
+                        "totp_enabled": user.totp_enabled
+                    }
+            except ImportError:
+                logger.warning("Auth manager not available for GDPR export")
+
+            # 5. Collect portfolio history if available
+            portfolio_path = self.data_dir / "portfolio" / f"{user_id}_snapshots.json"
+            if portfolio_path.exists():
+                async with aiofiles.open(portfolio_path, 'r') as f:
+                    content = await f.read()
+                    user_data["data_categories"]["portfolio_snapshots"] = json.loads(content)
+
+            # 6. Collect tax lots (important for GDPR as financial data)
+            if hasattr(self, '_tax_lots'):
+                user_tax_lots = [
+                    lot.__dict__ if hasattr(lot, '__dict__') else str(lot)
+                    for lot in self._tax_lots
+                    if hasattr(lot, 'user_id') and lot.user_id == user_id
+                ]
+                if user_tax_lots:
+                    user_data["data_categories"]["tax_lots"] = user_tax_lots
+
+            # 7. Collect API access logs if available
+            api_logs_path = self.data_dir / "api_logs" / f"{user_id}_access.json"
+            if api_logs_path.exists():
+                async with aiofiles.open(api_logs_path, 'r') as f:
+                    content = await f.read()
+                    user_data["data_categories"]["api_access_logs"] = json.loads(content)
+
+            # 8. Add data processing information (GDPR Art. 15)
+            user_data["data_processing_info"] = {
+                "purposes": [
+                    "Trading execution and management",
+                    "Risk analysis and portfolio optimization",
+                    "Tax calculation and reporting",
+                    "Security and fraud prevention",
+                    "Service improvement and analytics"
+                ],
+                "legal_basis": "Contract performance and legitimate interests",
+                "retention_period_days": self.retention_days,
+                "data_recipients": [
+                    "Exchange partners (for trade execution)",
+                    "Tax authorities (upon legal request)"
+                ],
+                "international_transfers": "Data may be processed in exchange jurisdictions",
+                "automated_decision_making": "Trading signals use ML-based scoring (user can opt-out)",
+                "data_source": "User-provided and trading activity generated"
+            }
+
+        except Exception as e:
+            logger.error(f"Error collecting GDPR data for {user_id}: {e}")
+            user_data["collection_errors"] = str(e)
 
         async with aiofiles.open(package_path, 'w') as f:
             await f.write(json.dumps(user_data, indent=2))
