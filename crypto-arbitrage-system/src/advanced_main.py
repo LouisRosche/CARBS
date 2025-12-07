@@ -316,7 +316,14 @@ class AdvancedArbitrageBot:
         min_spread = Decimal(str(self.config.trading.min_spread_percent)) / 100
         position_size = Decimal(str(self.config.trading.max_position_usd))
 
+        # Early exit threshold - if we find a score above this, take it immediately
+        EXCELLENT_SCORE_THRESHOLD = 0.85
+
         for buy_ob in valid_orderbooks:
+            # Early exit if we already found an excellent opportunity
+            if best_score >= EXCELLENT_SCORE_THRESHOLD:
+                break
+
             for sell_ob in valid_orderbooks:
                 if buy_ob.exchange == sell_ob.exchange:
                     continue
@@ -329,6 +336,11 @@ class AdvancedArbitrageBot:
                     continue
 
                 gross_spread = (sell_price - buy_price) / buy_price
+
+                # Quick pre-filter: Skip if gross spread can't possibly meet min after fees
+                # Typical fees are ~0.1% per side, so need at least min_spread + 0.2%
+                if gross_spread < min_spread:
+                    continue
 
                 # Get exchange fees
                 buy_fee = Decimal(str(self.config.exchanges[buy_ob.exchange].get('taker_fee', 0.001)))
@@ -381,6 +393,10 @@ class AdvancedArbitrageBot:
                         'score': score,
                         'position_size': position_size
                     }
+
+                    # Early exit for excellent opportunities
+                    if best_score >= EXCELLENT_SCORE_THRESHOLD:
+                        break
 
         # Return opportunity if score meets threshold
         if best_opportunity and best_score >= 0.6:  # 60% score threshold
