@@ -40,6 +40,13 @@ from security.encryption import SecretsManager, EncryptionError
 from security.audit import AuditLogger, AuditCategory, get_audit_logger
 from security.access_control import AccessControl, Permission, EmergencyControls
 
+# Import state manager for real-time data
+try:
+    from core.state_manager import StateManager, get_state_manager
+    STATE_MANAGER_AVAILABLE = True
+except ImportError:
+    STATE_MANAGER_AVAILABLE = False
+
 logger = logging.getLogger(__name__)
 
 
@@ -58,17 +65,52 @@ class Dashboard:
         self.emergency_controls: Optional[EmergencyControls] = None
         self.audit_logger: Optional[AuditLogger] = None
         self.session: Optional[Session] = None
+        self.state_manager: Optional['StateManager'] = None
 
-        # System state (would connect to actual bot in production)
-        self.system_state = {
+    def _get_system_state(self) -> Dict[str, Any]:
+        """Get system state from state manager or return defaults"""
+        if STATE_MANAGER_AVAILABLE and self.state_manager:
+            try:
+                trading_state = self.state_manager.get_trading_state()
+                return {
+                    'running': trading_state.running,
+                    'mode': trading_state.mode,
+                    'opportunities_detected': trading_state.opportunities_detected,
+                    'opportunities_executed': trading_state.opportunities_executed,
+                    'total_profit': float(trading_state.total_profit),
+                    'current_capital': float(trading_state.current_capital),
+                    'exchanges_connected': trading_state.exchanges_connected,
+                    'emergency_stop': trading_state.emergency_stop,
+                    'win_rate': trading_state.win_rate,
+                    'sharpe_ratio': trading_state.sharpe_ratio,
+                    'total_trades': trading_state.total_trades,
+                    'successful_trades': trading_state.successful_trades,
+                    'failed_trades': trading_state.failed_trades
+                }
+            except Exception as e:
+                logger.warning(f"Failed to get state from manager: {e}")
+
+        # Default state
+        return {
             'running': False,
             'mode': 'paper',
             'opportunities_detected': 0,
             'opportunities_executed': 0,
             'total_profit': 0.0,
             'current_capital': 10000.0,
-            'exchanges_connected': []
+            'exchanges_connected': [],
+            'emergency_stop': False,
+            'win_rate': 0.0,
+            'sharpe_ratio': 0.0,
+            'total_trades': 0,
+            'successful_trades': 0,
+            'failed_trades': 0
         }
+
+    @property
+    def system_state(self) -> Dict[str, Any]:
+        """Property to get current system state"""
+        return self._get_system_state()
 
     def _print(self, message: str, style: str = None):
         """Print with or without Rich"""
@@ -127,6 +169,17 @@ class Dashboard:
         # Initialize audit logger
         self.audit_logger = get_audit_logger()
         self._print("[green]✓[/green] Audit logging initialized")
+
+        # Initialize state manager for real-time data
+        if STATE_MANAGER_AVAILABLE:
+            try:
+                self.state_manager = get_state_manager()
+                self._print("[green]✓[/green] State manager connected")
+            except Exception as e:
+                self._print(f"[yellow]⚠[/yellow] State manager not available: {e}")
+                self.state_manager = None
+        else:
+            self._print("[yellow]⚠[/yellow] State manager not available - using defaults")
 
         # Check if any users exist
         if not self.auth_manager._users:
@@ -320,19 +373,26 @@ class Dashboard:
 
     def show_system_status(self):
         """Display system status"""
+        state = self.system_state
+
         if not self.console:
             print(f"\nSystem Status:")
-            print(f"  Running: {self.system_state['running']}")
-            print(f"  Mode: {self.system_state['mode']}")
+            print(f"  Running: {state['running']}")
+            print(f"  Mode: {state['mode']}")
+            print(f"  Opportunities: {state['opportunities_detected']} detected / {state['opportunities_executed']} executed")
+            print(f"  Profit: ${state['total_profit']:.2f}")
+            print(f"  Capital: ${state['current_capital']:.2f}")
+            print(f"  Win Rate: {state['win_rate']*100:.1f}%")
+            print(f"  Sharpe: {state['sharpe_ratio']:.2f}")
             return
 
         # Emergency status
-        if self.emergency_controls.is_emergency_mode:
+        if self.emergency_controls.is_emergency_mode or state.get('emergency_stop'):
             status = self.emergency_controls.get_emergency_status()
             self.console.print(Panel(
                 f"[bold red]⚠ EMERGENCY STOP ACTIVE[/bold red]\n"
-                f"Reason: {status['reason']}\n"
-                f"Activated by: {status['activated_by']}",
+                f"Reason: {status.get('reason', 'Unknown')}\n"
+                f"Activated by: {status.get('activated_by', 'System')}",
                 border_style="red"
             ))
 
@@ -343,22 +403,347 @@ class Dashboard:
 
         table.add_row(
             "Status",
-            "[green]Running[/green]" if self.system_state['running'] else "[red]Stopped[/red]"
+            "[green]Running[/green]" if state['running'] else "[red]Stopped[/red]"
         )
         table.add_row(
             "Mode",
-            "[yellow]Paper[/yellow]" if self.system_state['mode'] == 'paper' else "[red]Live[/red]"
+            "[yellow]Paper[/yellow]" if state['mode'] == 'paper' else "[red]Live[/red]"
         )
-        table.add_row("Opportunities Detected", str(self.system_state['opportunities_detected']))
-        table.add_row("Opportunities Executed", str(self.system_state['opportunities_executed']))
-        table.add_row("Total Profit", f"${self.system_state['total_profit']:.2f}")
-        table.add_row("Current Capital", f"${self.system_state['current_capital']:.2f}")
+        table.add_row("Opportunities Detected", str(state['opportunities_detected']))
+        table.add_row("Opportunities Executed", str(state['opportunities_executed']))
+        table.add_row("Total Profit", f"${state['total_profit']:.2f}")
+        table.add_row("Current Capital", f"${state['current_capital']:.2f}")
         table.add_row(
             "Exchanges",
-            ", ".join(self.system_state['exchanges_connected']) or "None connected"
+            ", ".join(state['exchanges_connected']) or "None connected"
         )
+        table.add_row("Total Trades", str(state.get('total_trades', 0)))
+        table.add_row("Successful/Failed", f"{state.get('successful_trades', 0)}/{state.get('failed_trades', 0)}")
+        table.add_row("Win Rate", f"{state.get('win_rate', 0)*100:.1f}%")
+        table.add_row("Sharpe Ratio", f"{state.get('sharpe_ratio', 0):.2f}")
 
         self.console.print(table)
+
+    def show_trading_controls(self):
+        """Display trading controls menu"""
+        self._print("\n[bold]Trading Controls[/bold]")
+
+        while True:
+            state = self.system_state
+            self._print(f"\nCurrent Status: {'[green]Running[/green]' if state['running'] else '[red]Stopped[/red]'}")
+            self._print(f"Mode: {state['mode'].upper()}")
+
+            self._print("\n1. Start trading")
+            self._print("2. Stop trading")
+            self._print("3. Switch mode (paper/live)")
+            self._print("4. View recent trades")
+            self._print("0. Back to main menu")
+
+            choice = self._input("\nSelect option")
+
+            if choice == '0':
+                break
+            elif choice == '1':
+                self._start_trading()
+            elif choice == '2':
+                self._stop_trading()
+            elif choice == '3':
+                self._switch_mode()
+            elif choice == '4':
+                self._show_recent_trades()
+
+    def _start_trading(self):
+        """Start the trading bot"""
+        if self.state_manager:
+            self.state_manager.update_trading_state(running=True)
+            self._print("[green]✓[/green] Trading started")
+        else:
+            self._print("[yellow]State manager not available - cannot control trading[/yellow]")
+
+    def _stop_trading(self):
+        """Stop the trading bot"""
+        if self.state_manager:
+            self.state_manager.update_trading_state(running=False)
+            self._print("[green]✓[/green] Trading stopped")
+        else:
+            self._print("[yellow]State manager not available - cannot control trading[/yellow]")
+
+    def _switch_mode(self):
+        """Switch between paper and live mode"""
+        if not self._confirm("[yellow]Switch trading mode? This will affect real funds in live mode![/yellow]"):
+            return
+
+        state = self.system_state
+        new_mode = 'live' if state['mode'] == 'paper' else 'paper'
+
+        if new_mode == 'live':
+            confirm = self._input("Type 'LIVE' to confirm switching to live mode")
+            if confirm != 'LIVE':
+                self._print("Mode switch cancelled")
+                return
+
+        if self.state_manager:
+            self.state_manager.update_trading_state(mode=new_mode)
+            self._print(f"[green]✓[/green] Switched to {new_mode.upper()} mode")
+        else:
+            self._print("[yellow]State manager not available[/yellow]")
+
+    def _show_recent_trades(self):
+        """Show recent trades"""
+        if self.state_manager:
+            trades = self.state_manager.get_recent_trades(limit=10)
+            if not trades:
+                self._print("[dim]No recent trades[/dim]")
+                return
+
+            if self.console:
+                table = Table(title="Recent Trades")
+                table.add_column("Time")
+                table.add_column("Symbol")
+                table.add_column("Side")
+                table.add_column("Profit")
+                table.add_column("Status")
+
+                for trade in trades:
+                    profit = trade.get('net_profit', 0)
+                    profit_style = 'green' if profit > 0 else 'red' if profit < 0 else 'dim'
+                    table.add_row(
+                        trade.get('recorded_at', 'N/A')[:19],
+                        trade.get('symbol', 'N/A'),
+                        trade.get('side', 'N/A'),
+                        f"[{profit_style}]${profit:.2f}[/{profit_style}]",
+                        trade.get('status', 'N/A')
+                    )
+                self.console.print(table)
+            else:
+                for trade in trades:
+                    print(f"  {trade.get('recorded_at', '')[:19]} | {trade.get('symbol', '')} | ${trade.get('net_profit', 0):.2f}")
+        else:
+            self._print("[dim]No trade data available[/dim]")
+
+    def show_portfolio_risk(self):
+        """Display portfolio and risk metrics"""
+        self._print("\n[bold]Portfolio & Risk[/bold]")
+
+        state = self.system_state
+
+        if self.console:
+            table = Table(title="Portfolio Overview")
+            table.add_column("Metric", style="cyan")
+            table.add_column("Value", style="green")
+
+            table.add_row("Current Capital", f"${state['current_capital']:.2f}")
+            table.add_row("Total Profit", f"${state['total_profit']:.2f}")
+            table.add_row("Win Rate", f"{state.get('win_rate', 0)*100:.1f}%")
+            table.add_row("Sharpe Ratio", f"{state.get('sharpe_ratio', 0):.2f}")
+
+            self.console.print(table)
+
+            # Risk metrics if available from state manager
+            if self.state_manager:
+                signal_state = self.state_manager.get_signal_state()
+
+                risk_table = Table(title="Market Sentiment")
+                risk_table.add_column("Asset", style="cyan")
+                risk_table.add_column("Sentiment")
+                risk_table.add_column("Score")
+
+                sentiment_score = signal_state.market_sentiment
+                sentiment_level = 'fear' if sentiment_score < 40 else 'greed' if sentiment_score > 60 else 'neutral'
+                color = 'red' if sentiment_level == 'fear' else 'green' if sentiment_level == 'greed' else 'yellow'
+                risk_table.add_row("Market", f"[{color}]{sentiment_level.upper()}[/{color}]", f"{sentiment_score:.0f}")
+
+                for asset, score in signal_state.asset_sentiment.items():
+                    level = 'fear' if score < 40 else 'greed' if score > 60 else 'neutral'
+                    c = 'red' if level == 'fear' else 'green' if level == 'greed' else 'yellow'
+                    risk_table.add_row(asset.upper(), f"[{c}]{level.upper()}[/{c}]", f"{score:.0f}")
+
+                self.console.print(risk_table)
+        else:
+            print(f"\nPortfolio:")
+            print(f"  Capital: ${state['current_capital']:.2f}")
+            print(f"  Profit: ${state['total_profit']:.2f}")
+            print(f"  Win Rate: {state.get('win_rate', 0)*100:.1f}%")
+
+    def show_configuration(self):
+        """Display configuration menu"""
+        self._print("\n[bold]Configuration[/bold]")
+        self._print("\nCurrent configuration can be modified in config/config.yaml")
+
+        if self.console:
+            try:
+                import yaml
+                from pathlib import Path
+                config_path = Path("config/config.yaml")
+                if config_path.exists():
+                    with open(config_path) as f:
+                        config = yaml.safe_load(f)
+
+                    table = Table(title="Trading Configuration")
+                    table.add_column("Setting", style="cyan")
+                    table.add_column("Value", style="green")
+
+                    trading = config.get('trading', {})
+                    table.add_row("Mode", trading.get('mode', 'paper'))
+                    table.add_row("Min Spread %", str(trading.get('min_spread_percent', 0.3)))
+                    table.add_row("Max Position USD", str(trading.get('max_position_usd', 500)))
+                    table.add_row("Max Daily Loss USD", str(trading.get('max_daily_loss_usd', 100)))
+                    table.add_row("Max Daily Trades", str(trading.get('max_daily_trades', 20)))
+
+                    self.console.print(table)
+                else:
+                    self._print("[yellow]Configuration file not found[/yellow]")
+            except Exception as e:
+                self._print(f"[red]Error reading config: {e}[/red]")
+        else:
+            print("Edit config/config.yaml to modify settings")
+
+    def show_audit_logs(self):
+        """Display audit log viewer"""
+        self._print("\n[bold]Audit Logs[/bold]")
+
+        limit = 20
+        try:
+            limit_input = self._input("Number of entries to show (default 20)")
+            if limit_input:
+                limit = int(limit_input)
+        except ValueError:
+            pass
+
+        events = self.audit_logger.query(limit=limit)
+
+        if not events:
+            self._print("[dim]No audit events found[/dim]")
+            return
+
+        if self.console:
+            table = Table(title=f"Last {len(events)} Audit Events")
+            table.add_column("Time", style="dim")
+            table.add_column("Category")
+            table.add_column("Action")
+            table.add_column("Actor")
+            table.add_column("Status")
+
+            for event in events:
+                status_icon = "[green]✓[/green]" if event.success else "[red]✗[/red]"
+                table.add_row(
+                    event.timestamp.strftime('%Y-%m-%d %H:%M:%S'),
+                    event.category.value if hasattr(event.category, 'value') else str(event.category),
+                    event.action,
+                    event.actor,
+                    status_icon
+                )
+
+            self.console.print(table)
+        else:
+            for event in events:
+                status = "✓" if event.success else "✗"
+                print(f"  {event.timestamp.strftime('%H:%M:%S')} [{event.category}] {status} {event.action} by {event.actor}")
+
+    def show_user_management(self):
+        """Display user management menu"""
+        self._print("\n[bold]User Management[/bold]")
+
+        while True:
+            self._print("\n1. List users")
+            self._print("2. Add user")
+            self._print("3. Change user role")
+            self._print("4. Reset user password")
+            self._print("0. Back to main menu")
+
+            choice = self._input("\nSelect option")
+
+            if choice == '0':
+                break
+            elif choice == '1':
+                self._list_users()
+            elif choice == '2':
+                self._add_user()
+            elif choice == '3':
+                self._change_user_role()
+            elif choice == '4':
+                self._reset_user_password()
+
+    def _list_users(self):
+        """List all users"""
+        if self.console:
+            table = Table(title="Users")
+            table.add_column("Username", style="cyan")
+            table.add_column("Role")
+            table.add_column("2FA")
+            table.add_column("Created")
+
+            for user in self.auth_manager._users.values():
+                mfa = "[green]Enabled[/green]" if user.totp_enabled else "[dim]Disabled[/dim]"
+                created = user.created_at.strftime('%Y-%m-%d') if user.created_at else "N/A"
+                table.add_row(user.username, user.role, mfa, created)
+
+            self.console.print(table)
+        else:
+            for user in self.auth_manager._users.values():
+                mfa = "2FA" if user.totp_enabled else ""
+                print(f"  {user.username} ({user.role}) {mfa}")
+
+    def _add_user(self):
+        """Add a new user"""
+        username = self._input("Username")
+        role = self._input("Role (viewer/analyst/trader/admin)")
+        if role not in ['viewer', 'analyst', 'trader', 'admin']:
+            self._print("[red]Invalid role[/red]")
+            return
+
+        password = self._password("Password (min 12 chars)")
+        if len(password) < 12:
+            self._print("[red]Password too short[/red]")
+            return
+
+        try:
+            self.auth_manager.create_user(username, password, role=role)
+            self._print(f"[green]✓[/green] User '{username}' created with role '{role}'")
+
+            self.audit_logger.log_security_event(
+                action='user_created',
+                actor=self.session.username,
+                resource=username,
+                details={'role': role}
+            )
+        except Exception as e:
+            self._print(f"[red]Error: {e}[/red]")
+
+    def _change_user_role(self):
+        """Change a user's role"""
+        username = self._input("Username")
+        user = self.auth_manager.get_user(username)
+        if not user:
+            self._print("[red]User not found[/red]")
+            return
+
+        self._print(f"Current role: {user.role}")
+        new_role = self._input("New role (viewer/analyst/trader/admin)")
+
+        if new_role in ['viewer', 'analyst', 'trader', 'admin']:
+            user.role = new_role
+            self._print(f"[green]✓[/green] Role changed to '{new_role}'")
+        else:
+            self._print("[red]Invalid role[/red]")
+
+    def _reset_user_password(self):
+        """Reset a user's password"""
+        username = self._input("Username")
+        user = self.auth_manager.get_user(username)
+        if not user:
+            self._print("[red]User not found[/red]")
+            return
+
+        new_password = self._password("New password (min 12 chars)")
+        if len(new_password) < 12:
+            self._print("[red]Password too short[/red]")
+            return
+
+        # Hash and update password
+        import hashlib
+        user.password_hash = hashlib.sha256(new_password.encode()).hexdigest()
+        self._print(f"[green]✓[/green] Password reset for '{username}'")
 
     def show_credentials_menu(self):
         """Manage API credentials"""
@@ -621,12 +1006,22 @@ class Dashboard:
                     break
                 elif choice == '1':
                     self.show_system_status()
+                elif choice == '2':
+                    self.show_trading_controls()
+                elif choice == '3':
+                    self.show_portfolio_risk()
+                elif choice == '4':
+                    self.show_configuration()
                 elif choice == '5':
                     self.show_credentials_menu()
+                elif choice == '6':
+                    self.show_audit_logs()
+                elif choice == '7':
+                    self.show_user_management()
                 elif choice == '8':
                     self.show_emergency_controls()
                 else:
-                    self._print(f"[yellow]Option {choice} not yet implemented[/yellow]")
+                    self._print(f"[yellow]Unknown option: {choice}[/yellow]")
 
             except KeyboardInterrupt:
                 self._print("\n\n[dim]Use option 0 to logout properly[/dim]")

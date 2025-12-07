@@ -26,10 +26,42 @@ from core.advanced_engine import (
 )
 from core.execution_engine import ExecutionEngine, TradeRecord as ExecTradeRecord
 from core.risk_manager import RiskManager, TradeRecord
+from core.state_manager import StateManager, get_state_manager
 from database.connection import DatabasePool
 from utils.cache import RedisCache
 from utils.metrics import MetricsCollector
 from config.settings import load_config
+
+# Import optional modules with graceful fallbacks
+try:
+    from core.antifragile import AntifragileCore
+    ANTIFRAGILE_AVAILABLE = True
+except ImportError:
+    ANTIFRAGILE_AVAILABLE = False
+
+try:
+    from signals import SignalManager, SentimentAggregator
+    SIGNALS_AVAILABLE = True
+except ImportError:
+    SIGNALS_AVAILABLE = False
+
+try:
+    from ml import MLAnalyzer
+    ML_ANALYZER_AVAILABLE = True
+except ImportError:
+    ML_ANALYZER_AVAILABLE = False
+
+try:
+    from notifications import NotificationManager
+    NOTIFICATIONS_AVAILABLE = True
+except ImportError:
+    NOTIFICATIONS_AVAILABLE = False
+
+try:
+    from compliance import ComplianceManager
+    COMPLIANCE_AVAILABLE = True
+except ImportError:
+    COMPLIANCE_AVAILABLE = False
 
 # Ensure log directory exists
 log_dir = Path('data/logs')
@@ -64,6 +96,15 @@ class AdvancedArbitrageBot:
         self.advanced_engine = None
         self.execution_engine = None
         self.risk_manager = None
+        self.state_manager = None
+
+        # Optional integrated modules
+        self.antifragile = None
+        self.signal_manager = None
+        self.sentiment_aggregator = None
+        self.ml_analyzer = None
+        self.notification_manager = None
+        self.compliance_manager = None
 
         self.running = False
         self.shutdown_event = asyncio.Event()
@@ -80,16 +121,27 @@ class AdvancedArbitrageBot:
         # Load configuration
         self.config = load_config()
 
+        # Initialize state manager first for cross-component communication
+        self.state_manager = get_state_manager()
+        self.state_manager.update_trading_state(
+            mode=self.config.trading.mode,
+            initial_capital=Decimal(str(self.config.trading.max_position_usd * 20))
+        )
+        logger.info("✓ State manager initialized")
+
         # Initialize database pool
         self.db_pool = DatabasePool(self.config.database)
         await self.db_pool.connect()
+        self.state_manager.update_system_health(database_connected=True)
 
         # Initialize Redis cache
         self.cache = RedisCache(self.config.redis)
         await self.cache.connect()
+        self.state_manager.update_system_health(redis_connected=True)
 
         # Initialize metrics collector
         self.metrics = MetricsCollector(self.config.monitoring['prometheus_port'])
+        self.state_manager.update_system_health(prometheus_running=True)
 
         # Initialize exchanges
         await self._initialize_exchanges()
@@ -99,11 +151,73 @@ class AdvancedArbitrageBot:
         self.execution_engine = ExecutionEngine(self.config, self.exchanges)
         self.risk_manager = RiskManager(self.config)
 
+        # Initialize optional integrated modules
+        await self._initialize_optional_modules()
+
         logger.info(f"✅ Initialized {len(self.exchanges)} exchanges")
         logger.info(f"📊 Monitoring: {', '.join(self.config.symbols)}")
         logger.info(f"🎯 Min spread: {self.config.trading.min_spread_percent}%")
         logger.info(f"📝 Mode: {'PAPER TRADING' if self.config.trading.mode == 'paper' else 'LIVE TRADING'}")
-        logger.info("✨ Advanced features: ML Scoring, Risk Management, Circuit Breakers")
+
+        features = ["ML Scoring", "Risk Management", "Circuit Breakers"]
+        if self.antifragile:
+            features.append("Antifragile Adaptation")
+        if self.signal_manager:
+            features.append("Signal Analysis")
+        if self.notification_manager:
+            features.append("Notifications")
+
+        logger.info(f"✨ Advanced features: {', '.join(features)}")
+
+        # Update state manager with connected exchanges
+        self.state_manager.update_trading_state(
+            exchanges_connected=list(self.exchanges.keys())
+        )
+
+    async def _initialize_optional_modules(self):
+        """Initialize optional integrated modules"""
+
+        # Antifragile Core - Self-learning and adaptation
+        if ANTIFRAGILE_AVAILABLE:
+            try:
+                self.antifragile = AntifragileCore(self.config)
+                await self.antifragile.initialize()
+                logger.info("✓ Antifragile module initialized")
+            except Exception as e:
+                logger.warning(f"⚠ Antifragile module failed: {e}")
+
+        # Signal Manager - Sentiment and news analysis
+        if SIGNALS_AVAILABLE:
+            try:
+                self.signal_manager = SignalManager(self.config)
+                self.sentiment_aggregator = SentimentAggregator()
+                logger.info("✓ Signal/Sentiment module initialized")
+            except Exception as e:
+                logger.warning(f"⚠ Signal module failed: {e}")
+
+        # ML Analyzer - Deep learning sentiment
+        if ML_ANALYZER_AVAILABLE:
+            try:
+                self.ml_analyzer = MLAnalyzer()
+                logger.info("✓ ML Analyzer initialized")
+            except Exception as e:
+                logger.warning(f"⚠ ML Analyzer failed: {e}")
+
+        # Notification Manager - Alerts
+        if NOTIFICATIONS_AVAILABLE:
+            try:
+                self.notification_manager = NotificationManager(self.config)
+                logger.info("✓ Notification module initialized")
+            except Exception as e:
+                logger.warning(f"⚠ Notification module failed: {e}")
+
+        # Compliance Manager - Tax and audit
+        if COMPLIANCE_AVAILABLE:
+            try:
+                self.compliance_manager = ComplianceManager()
+                logger.info("✓ Compliance module initialized")
+            except Exception as e:
+                logger.warning(f"⚠ Compliance module failed: {e}")
 
     async def _initialize_exchanges(self):
         """Initialize exchange connections"""
@@ -271,6 +385,24 @@ class AdvancedArbitrageBot:
         # Return opportunity if score meets threshold
         if best_opportunity and best_score >= 0.6:  # 60% score threshold
             self.opportunities_detected += 1
+
+            # Update state manager
+            self.state_manager.update_trading_state(
+                opportunities_detected=self.opportunities_detected,
+                opportunities_scored=self.opportunities_scored
+            )
+
+            # Record opportunity for dashboard
+            self.state_manager.record_opportunity({
+                'symbol': symbol,
+                'buy_exchange': best_opportunity['buy_exchange'],
+                'sell_exchange': best_opportunity['sell_exchange'],
+                'spread_percent': float(best_opportunity['spread_percent']),
+                'score': best_score,
+                'buy_price': float(best_opportunity['buy_price']),
+                'sell_price': float(best_opportunity['sell_price'])
+            })
+
             return best_opportunity
 
         return None
@@ -370,8 +502,76 @@ class AdvancedArbitrageBot:
             # Save to database
             await self._save_execution(opportunity, result, score)
 
-            # Log success with portfolio stats
+            # Update state manager
             portfolio_risk = self.risk_manager.calculate_portfolio_risk()
+            self.state_manager.update_trading_state(
+                opportunities_executed=self.opportunities_executed,
+                total_profit=Decimal(str(result.net_profit)) + self.state_manager.get_trading_state().total_profit,
+                win_rate=portfolio_risk.win_rate,
+                sharpe_ratio=portfolio_risk.sharpe_ratio,
+                sortino_ratio=portfolio_risk.sortino_ratio,
+                var_95=Decimal(str(portfolio_risk.var_95)),
+                total_trades=portfolio_risk.total_trades,
+                successful_trades=portfolio_risk.winning_trades if hasattr(portfolio_risk, 'winning_trades') else 0
+            )
+
+            # Record trade in state manager for dashboard
+            self.state_manager.record_trade({
+                'symbol': symbol,
+                'buy_exchange': opportunity['buy_exchange'],
+                'sell_exchange': opportunity['sell_exchange'],
+                'net_profit': float(result.net_profit),
+                'gross_profit': float(result.gross_profit),
+                'execution_time_ms': result.execution_time_ms,
+                'success': True,
+                'score': score.composite_score
+            })
+
+            # Record in compliance if available
+            if self.compliance_manager:
+                try:
+                    await self.compliance_manager.record_trade(
+                        symbol=symbol,
+                        side='arbitrage',
+                        quantity=float(position_risk.recommended_size / opportunity['buy_price']),
+                        price=float(opportunity['buy_price']),
+                        cost_basis=float(position_risk.recommended_size),
+                        proceeds=float(position_risk.recommended_size + result.net_profit)
+                    )
+                except Exception as e:
+                    logger.warning(f"Compliance recording failed: {e}")
+
+            # Send notification if available
+            if self.notification_manager:
+                try:
+                    await self.notification_manager.send_trade_alert(
+                        symbol=symbol,
+                        profit=float(result.net_profit),
+                        buy_exchange=opportunity['buy_exchange'],
+                        sell_exchange=opportunity['sell_exchange'],
+                        execution_time_ms=result.execution_time_ms
+                    )
+                except Exception as e:
+                    logger.warning(f"Notification failed: {e}")
+
+            # Update antifragile learning if available
+            if self.antifragile:
+                try:
+                    self.antifragile.record_outcome(
+                        symbol=symbol,
+                        success=True,
+                        profit=float(result.net_profit),
+                        score=score.composite_score,
+                        market_conditions={
+                            'volatility': float(volatility),
+                            'spread': float(opportunity['net_spread']),
+                            'liquidity': score.liquidity_score
+                        }
+                    )
+                except Exception as e:
+                    logger.warning(f"Antifragile update failed: {e}")
+
+            # Log success with portfolio stats
             logger.info(
                 f"\n{'='*80}\n"
                 f"✅ TRADE EXECUTED SUCCESSFULLY\n"
@@ -391,6 +591,7 @@ class AdvancedArbitrageBot:
             )
         else:
             logger.error(f"❌ Trade execution failed: {result.error_message}")
+            self.state_manager.record_error(f"Trade failed: {result.error_message}")
 
     async def _save_execution(self, opportunity: dict, result, score: OpportunityScore):
         """Save opportunity and execution to database"""
@@ -511,6 +712,9 @@ class AdvancedArbitrageBot:
         self.running = True
         await self.initialize()
 
+        # Update state manager
+        self.state_manager.update_trading_state(running=True)
+
         # Monitor all symbols in parallel
         tasks = [
             self.monitor_symbol(symbol)
@@ -520,12 +724,92 @@ class AdvancedArbitrageBot:
         # Add stats printer
         tasks.append(self.print_stats())
 
+        # Add sentiment monitoring if signal module available
+        if self.signal_manager and self.sentiment_aggregator:
+            tasks.append(self._monitor_sentiment())
+
+        # Add antifragile adaptation if available
+        if self.antifragile:
+            tasks.append(self._run_antifragile_adaptation())
+
         await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def _monitor_sentiment(self):
+        """Monitor market sentiment and update state"""
+        while self.running:
+            try:
+                # Aggregate sentiment from various sources
+                market_sentiment = await self.sentiment_aggregator.get_market_sentiment()
+
+                # Update state manager with sentiment
+                self.state_manager.update_signal_state(
+                    market_sentiment=market_sentiment.overall_score,
+                    market_trend=market_sentiment.trend
+                )
+
+                # Get asset-specific sentiment
+                for symbol in self.config.symbols:
+                    base_asset = symbol.replace('USDT', '').replace('/', '')
+                    asset_sentiment = await self.sentiment_aggregator.get_asset_sentiment(base_asset)
+                    if asset_sentiment:
+                        current = self.state_manager.get_signal_state().asset_sentiment
+                        current[base_asset.lower()] = asset_sentiment.score
+                        self.state_manager.update_signal_state(asset_sentiment=current)
+
+                # Check for trading signals
+                signals = await self.signal_manager.get_active_signals()
+                for signal in signals:
+                    self.state_manager.add_active_signal({
+                        'asset': signal.get('symbol', 'UNKNOWN'),
+                        'type': signal.get('direction', 'neutral'),
+                        'confidence': signal.get('confidence', 0.5),
+                        'source': signal.get('source', 'sentiment')
+                    })
+
+                await asyncio.sleep(60)  # Update every minute
+
+            except Exception as e:
+                logger.warning(f"Sentiment monitoring error: {e}")
+                await asyncio.sleep(120)  # Backoff on error
+
+    async def _run_antifragile_adaptation(self):
+        """Run antifragile parameter adaptation"""
+        while self.running:
+            try:
+                # Run adaptation cycle
+                adaptations = await self.antifragile.run_adaptation_cycle()
+
+                if adaptations:
+                    logger.info(f"🔄 Antifragile adaptations applied: {adaptations}")
+
+                    # Update config with new parameters
+                    for param, value in adaptations.items():
+                        if hasattr(self.config.trading, param):
+                            setattr(self.config.trading, param, value)
+
+                # Run stress test periodically
+                stress_results = await self.antifragile.run_stress_test()
+                if stress_results.get('risk_level', 0) > 0.8:
+                    logger.warning(f"⚠️ High stress detected: {stress_results}")
+                    self.state_manager.update_signal_state(
+                        current_regime='volatile',
+                        regime_confidence=stress_results.get('confidence', 0.5)
+                    )
+
+                await asyncio.sleep(300)  # Adapt every 5 minutes
+
+            except Exception as e:
+                logger.warning(f"Antifragile adaptation error: {e}")
+                await asyncio.sleep(600)  # Backoff on error
 
     async def shutdown(self):
         """Cleanup and close connections"""
         logger.info("🛑 Shutting down...")
         self.running = False
+
+        # Update state manager
+        if self.state_manager:
+            self.state_manager.update_trading_state(running=False)
 
         # Print final stats
         logger.info("\n" + "="*80)
@@ -543,6 +827,23 @@ class AdvancedArbitrageBot:
         logger.info(f"Sharpe Ratio: {risk_summary['sharpe_ratio']}")
         logger.info("="*80 + "\n")
 
+        # Shutdown optional modules
+        if self.antifragile:
+            try:
+                await self.antifragile.shutdown()
+                logger.info("✓ Antifragile module shutdown")
+            except Exception as e:
+                logger.warning(f"Antifragile shutdown error: {e}")
+
+        if self.notification_manager:
+            try:
+                await self.notification_manager.send_system_alert(
+                    "CARBS System Shutdown",
+                    f"Final P&L: ${exec_stats['total_profit']:.2f}"
+                )
+            except Exception as e:
+                logger.warning(f"Notification error: {e}")
+
         # Close exchange connections
         for exchange in self.exchanges.values():
             await exchange.close()
@@ -550,10 +851,14 @@ class AdvancedArbitrageBot:
         # Close database pool
         if self.db_pool:
             await self.db_pool.close()
+            if self.state_manager:
+                self.state_manager.update_system_health(database_connected=False)
 
         # Close Redis connection
         if self.cache:
             await self.cache.close()
+            if self.state_manager:
+                self.state_manager.update_system_health(redis_connected=False)
 
         logger.info("✅ Shutdown complete")
 

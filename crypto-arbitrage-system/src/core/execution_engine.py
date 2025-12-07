@@ -386,11 +386,17 @@ class ExecutionEngine:
                     f"in {result.execution_time_ms}ms"
                 )
             else:
-                # Partial fill or failure - need to handle
+                # Partial fill or failure - need to handle position rebalancing
                 result.error_message = "One or both orders did not fill completely"
                 logger.warning(result.error_message)
 
-                # TODO: Implement position rebalancing logic
+                # Implement position rebalancing logic
+                await self._rebalance_partial_fills(
+                    buy_order=buy_order,
+                    sell_order=sell_order,
+                    symbol=symbol,
+                    result=result
+                )
 
         except Exception as e:
             result.error_message = str(e)
@@ -489,6 +495,98 @@ class ExecutionEngine:
         order.updated_at = datetime.now(timezone.utc)
 
         return order
+
+    async def _rebalance_partial_fills(
+        self,
+        buy_order: 'OrderState',
+        sell_order: 'OrderState',
+        symbol: str,
+        result: 'ArbitrageResult'
+    ) -> None:
+        """
+        Handle position rebalancing when arbitrage orders partially fill
+
+        Strategy:
+        1. If buy filled more than sell: Sell excess on buy exchange
+        2. If sell filled more than buy: Buy shortage on sell exchange
+        3. Cancel any remaining unfilled portions
+
+        This ensures we don't end up with unhedged positions.
+        """
+        buy_filled = buy_order.filled_amount or Decimal("0")
+        sell_filled = sell_order.filled_amount or Decimal("0")
+
+        logger.info(
+            f"🔄 Rebalancing positions - Buy filled: {buy_filled}, Sell filled: {sell_filled}"
+        )
+
+        try:
+            # Cancel any remaining open portions
+            if buy_order.status == OrderStatus.PARTIALLY_FILLED and buy_order.order_id:
+                await self.cancel_order(buy_order.exchange, buy_order.order_id)
+                logger.info(f"Cancelled remaining buy order on {buy_order.exchange}")
+
+            if sell_order.status == OrderStatus.PARTIALLY_FILLED and sell_order.order_id:
+                await self.cancel_order(sell_order.exchange, sell_order.order_id)
+                logger.info(f"Cancelled remaining sell order on {sell_order.exchange}")
+
+            # Calculate imbalance
+            imbalance = buy_filled - sell_filled
+
+            if imbalance > Decimal("0.0001"):
+                # We bought more than we sold - need to sell the excess
+                logger.info(f"Selling excess {imbalance} {symbol} on {buy_order.exchange}")
+
+                rebalance_order = await self._execute_order(
+                    exchange_name=buy_order.exchange,
+                    symbol=symbol,
+                    side='sell',
+                    amount=imbalance,
+                    price=buy_order.avg_fill_price * Decimal("0.999")  # Slightly below to ensure fill
+                )
+
+                if rebalance_order.status == OrderStatus.FILLED:
+                    # Adjust result for rebalancing trade
+                    rebalance_value = rebalance_order.filled_amount * rebalance_order.avg_fill_price
+                    result.gross_profit = (result.gross_profit or Decimal("0")) - rebalance_order.fee
+                    result.net_profit = (result.net_profit or Decimal("0")) - rebalance_order.fee
+                    logger.info(f"✅ Rebalanced by selling {imbalance} {symbol}")
+                else:
+                    result.error_message = (result.error_message or "") + f"; Rebalance sell failed"
+                    logger.error(f"Failed to rebalance sell: {rebalance_order.error_message}")
+
+            elif imbalance < Decimal("-0.0001"):
+                # We sold more than we bought - need to buy the shortage
+                shortage = abs(imbalance)
+                logger.info(f"Buying shortage {shortage} {symbol} on {sell_order.exchange}")
+
+                rebalance_order = await self._execute_order(
+                    exchange_name=sell_order.exchange,
+                    symbol=symbol,
+                    side='buy',
+                    amount=shortage,
+                    price=sell_order.avg_fill_price * Decimal("1.001")  # Slightly above to ensure fill
+                )
+
+                if rebalance_order.status == OrderStatus.FILLED:
+                    # Adjust result for rebalancing trade
+                    result.gross_profit = (result.gross_profit or Decimal("0")) - rebalance_order.fee
+                    result.net_profit = (result.net_profit or Decimal("0")) - rebalance_order.fee
+                    logger.info(f"✅ Rebalanced by buying {shortage} {symbol}")
+                else:
+                    result.error_message = (result.error_message or "") + f"; Rebalance buy failed"
+                    logger.error(f"Failed to rebalance buy: {rebalance_order.error_message}")
+
+            else:
+                # Positions are balanced (within tolerance)
+                logger.info("Positions balanced after partial fills")
+
+            # Record the rebalancing attempt
+            result.success = buy_filled > 0 and sell_filled > 0  # Partial success if both had some fill
+
+        except Exception as e:
+            logger.error(f"Error during position rebalancing: {e}")
+            result.error_message = (result.error_message or "") + f"; Rebalance error: {e}"
 
     async def cancel_order(
         self,
