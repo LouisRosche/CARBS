@@ -407,7 +407,8 @@ class RiskManager:
             wins = [t for t in self.trade_history if t.net_profit > 0]
             losses = [t for t in self.trade_history if t.net_profit < 0]
 
-            win_prob = len(wins) / len(self.trade_history)
+            total_trades = len(self.trade_history)
+            win_prob = len(wins) / total_trades if total_trades > 0 else 0.5
             avg_win = sum(t.net_profit for t in wins) / len(wins) if wins else Decimal('0')
             avg_loss = abs(sum(t.net_profit for t in losses) / len(losses)) if losses else Decimal('1')
         else:
@@ -522,8 +523,10 @@ class RiskManager:
         # Calculate returns
         returns = []
         for i in range(1, len(self.equity_curve)):
-            ret = (self.equity_curve[i] - self.equity_curve[i-1]) / self.equity_curve[i-1]
-            returns.append(ret)
+            prev_value = self.equity_curve[i-1]
+            if prev_value != 0:
+                ret = (self.equity_curve[i] - prev_value) / prev_value
+                returns.append(ret)
 
         # VaR calculations
         var_95 = ValueAtRisk.calculate_var(returns, confidence=0.95)
@@ -547,7 +550,8 @@ class RiskManager:
         wins = [t for t in self.trade_history if t.net_profit > 0]
         losses = [t for t in self.trade_history if t.net_profit < 0]
 
-        win_rate = len(wins) / len(self.trade_history)
+        total_trades = len(self.trade_history)
+        win_rate = len(wins) / total_trades if total_trades > 0 else 0.5
         avg_win = sum(t.net_profit for t in wins) / len(wins) if wins else Decimal('0')
         avg_loss = abs(sum(t.net_profit for t in losses) / len(losses)) if losses else Decimal('0')
 
@@ -615,7 +619,7 @@ class RiskManager:
             return True
 
         # Check current drawdown
-        current_dd_pct = float((self.peak_capital - self.current_capital) / self.peak_capital)
+        current_dd_pct = float((self.peak_capital - self.current_capital) / self.peak_capital) if self.peak_capital > 0 else 0.0
         if current_dd_pct > 0.10:  # 10% drawdown
             logger.warning(f"Reducing risk due to drawdown: {current_dd_pct:.1%}")
             return True

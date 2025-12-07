@@ -13,7 +13,6 @@ Advanced ML capabilities:
 import asyncio
 import logging
 import hashlib
-import pickle
 import statistics
 from datetime import datetime, timezone, timedelta
 from typing import Dict, List, Optional, Any, Tuple, Callable
@@ -782,8 +781,8 @@ class ResearchIngester:
         self.data_dir = data_dir or Path("data/research")
         self.data_dir.mkdir(parents=True, exist_ok=True)
 
-        self._research_cache: List[Dict] = []
-        self._insights: List[Dict] = []
+        self._research_cache: deque = deque(maxlen=200)  # Limit cached papers
+        self._insights: deque = deque(maxlen=500)  # Limit stored insights
 
     async def fetch_arxiv_papers(
         self,

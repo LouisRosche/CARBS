@@ -38,7 +38,7 @@ class OrderStatus(Enum):
     """Order execution status"""
     PENDING = "pending"
     SUBMITTED = "submitted"
-    PARTIAL = "partial"
+    PARTIALLY_FILLED = "partially_filled"  # Fixed: was PARTIAL
     FILLED = "filled"
     CANCELLED = "cancelled"
     FAILED = "failed"
@@ -71,7 +71,7 @@ class OrderState:
 
     @property
     def is_active(self) -> bool:
-        return self.status in [OrderStatus.PENDING, OrderStatus.SUBMITTED, OrderStatus.PARTIAL]
+        return self.status in [OrderStatus.PENDING, OrderStatus.SUBMITTED, OrderStatus.PARTIALLY_FILLED]
 
     @property
     def execution_time_ms(self) -> int:
@@ -359,8 +359,31 @@ class ExecutionEngine:
                 price=sell_price
             )
 
-            # Wait for both orders
-            buy_order, sell_order = await asyncio.gather(buy_task, sell_task)
+            # Wait for both orders - use return_exceptions to avoid orphaned positions
+            results = await asyncio.gather(buy_task, sell_task, return_exceptions=True)
+
+            # Check for exceptions
+            buy_order = results[0]
+            sell_order = results[1]
+
+            # Handle exceptions from either leg
+            if isinstance(buy_order, Exception):
+                result.error_message = f"Buy order failed: {buy_order}"
+                logger.error(result.error_message)
+                # If sell succeeded, need to unwind
+                if not isinstance(sell_order, Exception) and sell_order.is_filled:
+                    logger.warning("Unwinding sell position due to failed buy")
+                    await self._execute_order(sell_exchange, symbol, 'buy', sell_order.filled_amount, sell_order.avg_fill_price)
+                return result
+
+            if isinstance(sell_order, Exception):
+                result.error_message = f"Sell order failed: {sell_order}"
+                logger.error(result.error_message)
+                # If buy succeeded, need to unwind
+                if buy_order.is_filled:
+                    logger.warning("Unwinding buy position due to failed sell")
+                    await self._execute_order(buy_exchange, symbol, 'sell', buy_order.filled_amount, buy_order.avg_fill_price)
+                return result
 
             # Check if both filled
             if buy_order.is_filled and sell_order.is_filled:
