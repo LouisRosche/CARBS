@@ -99,7 +99,7 @@ class ArbitrageEngine:
         await self.cache.connect()
         
         # Initialize metrics collector
-        self.metrics = MetricsCollector(self.config.monitoring.prometheus_port)
+        self.metrics = MetricsCollector(self.config.monitoring['prometheus_port'])
         
         # Initialize exchanges
         await self._initialize_exchanges()
@@ -335,7 +335,7 @@ class ArbitrageEngine:
         """Continuously monitor one symbol"""
         logger.info(f"👀 Monitoring {symbol}...")
         
-        check_interval = self.config.performance.check_interval_seconds
+        check_interval = self.config.performance.get('check_interval_seconds', 1)
         
         while self.running:
             try:
