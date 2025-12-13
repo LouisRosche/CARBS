@@ -67,6 +67,28 @@ DEFAULT_PERFORMANCE = {
     "check_interval_seconds": 1
 }
 
+# Validation bounds for performance parameters
+PERFORMANCE_BOUNDS = {
+    "cache_ttl_seconds": (1, 3600),  # 1 second to 1 hour
+    "max_concurrent_requests": (1, 100),
+    "rate_limit_per_second": (1, 100),
+    "check_interval_seconds": (0.1, 60)  # Minimum 100ms, max 60 seconds
+}
+
+# Validation bounds for monitoring parameters
+MONITORING_BOUNDS = {
+    "prometheus_port": (1024, 65535),
+    "healthcheck_interval": (5, 300)
+}
+
+# Validation bounds for risk management parameters
+RISK_BOUNDS = {
+    "max_drawdown_percent": (1.0, 50.0),
+    "position_limit_percent": (1.0, 100.0),
+    "correlation_threshold": (0.0, 1.0),
+    "var_confidence": (0.9, 0.99)
+}
+
 DEFAULT_RISK_MANAGEMENT = {
     "max_drawdown_percent": 10.0,
     "position_limit_percent": 20.0,
@@ -126,6 +148,48 @@ def _merge_with_defaults(data: Optional[Dict], defaults: Dict) -> Dict:
 def _safe_get(data: Dict, key: str, default: Any = None) -> Any:
     """Safely get a value from dict with default"""
     return data.get(key, default) if data else default
+
+
+def validate_bounds(data: Dict, bounds: Dict, section_name: str) -> None:
+    """
+    Validate that numeric values in data fall within specified bounds.
+
+    Args:
+        data: Dictionary of config values to validate
+        bounds: Dictionary mapping keys to (min, max) tuples
+        section_name: Name of config section (for error messages)
+
+    Raises:
+        ConfigValidationError: If any value is out of bounds
+    """
+    if not data:
+        return
+
+    for key, (min_val, max_val) in bounds.items():
+        if key in data:
+            value = data[key]
+            if isinstance(value, (int, float)):
+                if value < min_val or value > max_val:
+                    raise ConfigValidationError(
+                        f"{section_name}.{key} must be between {min_val} and {max_val}, got {value}"
+                    )
+
+
+def validate_path_safe(path_value: str, section_name: str) -> None:
+    """
+    Validate that a path doesn't contain path traversal attempts.
+
+    Args:
+        path_value: Path string to validate
+        section_name: Name of config section (for error messages)
+
+    Raises:
+        ConfigValidationError: If path contains traversal patterns
+    """
+    if path_value and '..' in path_value:
+        raise ConfigValidationError(
+            f"{section_name} contains potential path traversal: {path_value}"
+        )
 
 
 def validate_exchange_config(exchanges: Dict) -> None:
@@ -195,16 +259,31 @@ def load_config(path: str = "config/config.yaml") -> Config:
     exchanges = _safe_get(data, 'exchanges', {})
     validate_exchange_config(exchanges)
 
+    # Get merged configs for validation
+    monitoring_config = _merge_with_defaults(_safe_get(data, 'monitoring'), DEFAULT_MONITORING)
+    performance_config = _merge_with_defaults(_safe_get(data, 'performance'), DEFAULT_PERFORMANCE)
+    risk_config = _merge_with_defaults(_safe_get(data, 'risk_management'), DEFAULT_RISK_MANAGEMENT)
+    logging_config = _merge_with_defaults(_safe_get(data, 'logging'), DEFAULT_LOGGING)
+
+    # Validate bounds for numeric parameters
+    validate_bounds(performance_config, PERFORMANCE_BOUNDS, 'performance')
+    validate_bounds(monitoring_config, MONITORING_BOUNDS, 'monitoring')
+    validate_bounds(risk_config, RISK_BOUNDS, 'risk_management')
+
+    # Validate path safety for log file
+    if 'file' in logging_config:
+        validate_path_safe(logging_config['file'], 'logging.file')
+
     # Build config with defaults for missing sections
     try:
         config = Config(
             trading=trading_config,
             exchanges=exchanges,
             symbols=_safe_get(data, 'symbols', ["BTC/USDT", "ETH/USDT"]),
-            monitoring=_merge_with_defaults(_safe_get(data, 'monitoring'), DEFAULT_MONITORING),
-            performance=_merge_with_defaults(_safe_get(data, 'performance'), DEFAULT_PERFORMANCE),
-            risk_management=_merge_with_defaults(_safe_get(data, 'risk_management'), DEFAULT_RISK_MANAGEMENT),
-            logging=_merge_with_defaults(_safe_get(data, 'logging'), DEFAULT_LOGGING),
+            monitoring=monitoring_config,
+            performance=performance_config,
+            risk_management=risk_config,
+            logging=logging_config,
             database=_merge_with_defaults(_safe_get(data, 'database'), DEFAULT_DATABASE),
             redis=_merge_with_defaults(_safe_get(data, 'redis'), DEFAULT_REDIS)
         )

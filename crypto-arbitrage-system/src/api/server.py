@@ -147,6 +147,43 @@ def create_app() -> 'FastAPI':
         allow_headers=["Authorization", "Content-Type"],
     )
 
+    # HTTPS enforcement middleware
+    @app.middleware("http")
+    async def https_redirect(request: Request, call_next):
+        """
+        Redirect HTTP to HTTPS in production environments.
+        Check X-Forwarded-Proto header for reverse proxy setups.
+        """
+        # Skip for health checks and local development
+        if request.url.path == "/health":
+            return await call_next(request)
+
+        # Check if running behind a reverse proxy with HTTPS
+        forwarded_proto = request.headers.get("x-forwarded-proto", "")
+        is_https = (
+            request.url.scheme == "https" or
+            forwarded_proto == "https"
+        )
+
+        # Enforce HTTPS in production (when ENFORCE_HTTPS env var is set)
+        enforce_https = os.getenv("ENFORCE_HTTPS", "").lower() in ("true", "1", "yes")
+        if enforce_https and not is_https:
+            # Return 301 redirect to HTTPS
+            https_url = str(request.url).replace("http://", "https://", 1)
+            return JSONResponse(
+                status_code=301,
+                headers={"Location": https_url},
+                content={"error": "HTTPS required", "redirect": https_url}
+            )
+
+        response = await call_next(request)
+
+        # Add HSTS header when serving over HTTPS
+        if is_https or enforce_https:
+            response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains; preload"
+
+        return response
+
     # Security headers middleware
     @app.middleware("http")
     async def security_headers(request: Request, call_next):
@@ -157,6 +194,9 @@ def create_app() -> 'FastAPI':
         response.headers["X-Frame-Options"] = "DENY"
         response.headers["X-XSS-Protection"] = "1; mode=block"
         response.headers["Cache-Control"] = "no-store"
+        response.headers["Content-Security-Policy"] = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'"
+        response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+        response.headers["Permissions-Policy"] = "geolocation=(), microphone=(), camera=()"
 
         return response
 

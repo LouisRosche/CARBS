@@ -118,14 +118,16 @@ class KellyCriterion:
         if avg_loss == 0 or win_probability <= 0 or win_probability >= 1:
             return Decimal('0')
 
-        p = win_probability
-        q = 1 - p
-        b = float(avg_win / avg_loss) if avg_loss > 0 else 0
+        # Convert all values to Decimal for precision
+        p = Decimal(str(win_probability))
+        q = Decimal('1') - p
+        b = avg_win / avg_loss if avg_loss > 0 else Decimal('0')
+        safety = Decimal(str(safety_factor))
 
         if b <= 0:
             return Decimal('0')
 
-        # Kelly formula
+        # Kelly formula: f* = (p * b - q) / b
         kelly_fraction = (p * b - q) / b
 
         # Don't bet if Kelly is negative
@@ -133,12 +135,13 @@ class KellyCriterion:
             return Decimal('0')
 
         # Apply safety factor (typically 0.25 for quarter-Kelly)
-        safe_kelly = kelly_fraction * safety_factor
+        safe_kelly = kelly_fraction * safety
 
         # Cap at reasonable maximum (e.g., 10% of capital)
-        safe_kelly = min(safe_kelly, 0.10)
+        max_fraction = Decimal('0.10')
+        safe_kelly = min(safe_kelly, max_fraction)
 
-        position_size = capital * Decimal(str(safe_kelly))
+        position_size = capital * safe_kelly
 
         return position_size
 

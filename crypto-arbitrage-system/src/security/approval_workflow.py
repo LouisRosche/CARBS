@@ -116,6 +116,7 @@ class ApprovalWorkflowEngine:
     - Time-delayed execution
     - Audit trail
     - Notification integration
+    - Thread-safe operations with asyncio.Lock
     """
 
     # Default approval rules
@@ -196,6 +197,9 @@ class ApprovalWorkflowEngine:
         self._rules: Dict[ApprovalType, ApprovalRule] = dict(self.DEFAULT_RULES)
         self._pending_requests: Dict[str, ApprovalRequest] = {}
         self._completed_requests: List[ApprovalRequest] = []
+
+        # Thread-safety lock for concurrent access to pending requests
+        self._lock = asyncio.Lock()
 
         self._load_state()
 
@@ -330,8 +334,9 @@ class ApprovalWorkflowEngine:
 
         request.request_hash = self._compute_request_hash(request)
 
-        self._pending_requests[request_id] = request
-        self._save_state()
+        async with self._lock:
+            self._pending_requests[request_id] = request
+            self._save_state()
 
         logger.info(
             f"Approval request {request_id} created: {approval_type.value} by {requester_id}"
@@ -365,81 +370,82 @@ class ApprovalWorkflowEngine:
         Returns:
             (success: bool, message: str, is_fully_approved: bool)
         """
-        request = self._pending_requests.get(request_id)
-        if not request:
-            return False, "Request not found", False
+        async with self._lock:
+            request = self._pending_requests.get(request_id)
+            if not request:
+                return False, "Request not found", False
 
-        # Check status
-        if request.status != ApprovalStatus.PENDING:
-            return False, f"Request is {request.status.value}", False
+            # Check status
+            if request.status != ApprovalStatus.PENDING:
+                return False, f"Request is {request.status.value}", False
 
-        # Check expiry
-        if datetime.now(timezone.utc) > request.expires_at:
-            request.status = ApprovalStatus.EXPIRED
+            # Check expiry
+            if datetime.now(timezone.utc) > request.expires_at:
+                request.status = ApprovalStatus.EXPIRED
+                self._save_state()
+                return False, "Request has expired", False
+
+            rule = self._rules.get(request.approval_type)
+
+            # Check role
+            if approver_role not in rule.required_roles:
+                return False, f"Role {approver_role} cannot approve this request", False
+
+            # Check self-approval
+            if not rule.allow_self_approval and approver_id == request.requester_id:
+                return False, "Self-approval not allowed", False
+
+            # Check 2FA requirement
+            if rule.require_2fa and not verified_2fa:
+                return False, "2FA verification required", False
+
+            # Check if already approved by this user
+            if any(a["approver_id"] == approver_id for a in request.approvals):
+                return False, "Already approved by this user", False
+
+            # Record approval
+            decision = ApprovalDecision(
+                decision_id=hashlib.sha256(
+                    f"{request_id}:{approver_id}:{datetime.now().isoformat()}".encode()
+                ).hexdigest()[:16],
+                request_id=request_id,
+                approver_id=approver_id,
+                approver_role=approver_role,
+                decision="approve",
+                reason=reason,
+                timestamp=datetime.now(timezone.utc),
+                ip_address=ip_address,
+                verified_2fa=verified_2fa
+            )
+
+            request.approvals.append({
+                "decision_id": decision.decision_id,
+                "approver_id": approver_id,
+                "approver_role": approver_role,
+                "reason": reason,
+                "timestamp": decision.timestamp.isoformat(),
+                "ip_address": ip_address
+            })
+
+            # Check if fully approved
+            is_fully_approved = len(request.approvals) >= rule.required_approvers
+
+            if is_fully_approved:
+                request.status = ApprovalStatus.APPROVED
+
+                logger.info(f"Request {request_id} fully approved")
+
+                if self.notification_callback:
+                    await self.notification_callback(
+                        f"Request Approved: {request.approval_type.value}",
+                        f"Request ID: {request_id}\n"
+                        f"Approvers: {len(request.approvals)}/{rule.required_approvers}\n"
+                        f"Executable at: {request.executable_at.strftime('%Y-%m-%d %H:%M UTC')}"
+                    )
+
             self._save_state()
-            return False, "Request has expired", False
 
-        rule = self._rules.get(request.approval_type)
-
-        # Check role
-        if approver_role not in rule.required_roles:
-            return False, f"Role {approver_role} cannot approve this request", False
-
-        # Check self-approval
-        if not rule.allow_self_approval and approver_id == request.requester_id:
-            return False, "Self-approval not allowed", False
-
-        # Check 2FA requirement
-        if rule.require_2fa and not verified_2fa:
-            return False, "2FA verification required", False
-
-        # Check if already approved by this user
-        if any(a["approver_id"] == approver_id for a in request.approvals):
-            return False, "Already approved by this user", False
-
-        # Record approval
-        decision = ApprovalDecision(
-            decision_id=hashlib.sha256(
-                f"{request_id}:{approver_id}:{datetime.now().isoformat()}".encode()
-            ).hexdigest()[:16],
-            request_id=request_id,
-            approver_id=approver_id,
-            approver_role=approver_role,
-            decision="approve",
-            reason=reason,
-            timestamp=datetime.now(timezone.utc),
-            ip_address=ip_address,
-            verified_2fa=verified_2fa
-        )
-
-        request.approvals.append({
-            "decision_id": decision.decision_id,
-            "approver_id": approver_id,
-            "approver_role": approver_role,
-            "reason": reason,
-            "timestamp": decision.timestamp.isoformat(),
-            "ip_address": ip_address
-        })
-
-        # Check if fully approved
-        is_fully_approved = len(request.approvals) >= rule.required_approvers
-
-        if is_fully_approved:
-            request.status = ApprovalStatus.APPROVED
-
-            logger.info(f"Request {request_id} fully approved")
-
-            if self.notification_callback:
-                await self.notification_callback(
-                    f"Request Approved: {request.approval_type.value}",
-                    f"Request ID: {request_id}\n"
-                    f"Approvers: {len(request.approvals)}/{rule.required_approvers}\n"
-                    f"Executable at: {request.executable_at.strftime('%Y-%m-%d %H:%M UTC')}"
-                )
-
-        self._save_state()
-
-        return True, "Approval recorded", is_fully_approved
+            return True, "Approval recorded", is_fully_approved
 
     async def reject(
         self,
@@ -455,42 +461,43 @@ class ApprovalWorkflowEngine:
         Returns:
             (success: bool, message: str)
         """
-        request = self._pending_requests.get(request_id)
-        if not request:
-            return False, "Request not found"
+        async with self._lock:
+            request = self._pending_requests.get(request_id)
+            if not request:
+                return False, "Request not found"
 
-        if request.status != ApprovalStatus.PENDING:
-            return False, f"Request is {request.status.value}"
+            if request.status != ApprovalStatus.PENDING:
+                return False, f"Request is {request.status.value}"
 
-        rule = self._rules.get(request.approval_type)
+            rule = self._rules.get(request.approval_type)
 
-        # Check role
-        if rejector_role not in rule.required_roles:
-            return False, f"Role {rejector_role} cannot reject this request"
+            # Check role
+            if rejector_role not in rule.required_roles:
+                return False, f"Role {rejector_role} cannot reject this request"
 
-        # Record rejection
-        request.rejections.append({
-            "rejector_id": rejector_id,
-            "rejector_role": rejector_role,
-            "reason": reason,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "ip_address": ip_address
-        })
+            # Record rejection
+            request.rejections.append({
+                "rejector_id": rejector_id,
+                "rejector_role": rejector_role,
+                "reason": reason,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "ip_address": ip_address
+            })
 
-        request.status = ApprovalStatus.REJECTED
-        self._save_state()
+            request.status = ApprovalStatus.REJECTED
+            self._save_state()
 
-        logger.info(f"Request {request_id} rejected by {rejector_id}: {reason}")
+            logger.info(f"Request {request_id} rejected by {rejector_id}: {reason}")
 
-        if self.notification_callback:
-            await self.notification_callback(
-                f"Request Rejected: {request.approval_type.value}",
-                f"Request ID: {request_id}\n"
-                f"Rejected by: {rejector_id}\n"
-                f"Reason: {reason}"
-            )
+            if self.notification_callback:
+                await self.notification_callback(
+                    f"Request Rejected: {request.approval_type.value}",
+                    f"Request ID: {request_id}\n"
+                    f"Rejected by: {rejector_id}\n"
+                    f"Reason: {reason}"
+                )
 
-        return True, "Request rejected"
+            return True, "Request rejected"
 
     async def execute_if_ready(
         self,
@@ -503,40 +510,50 @@ class ApprovalWorkflowEngine:
         Returns:
             (success: bool, message: str, result: Any)
         """
-        request = self._pending_requests.get(request_id)
-        if not request:
-            return False, "Request not found", None
+        async with self._lock:
+            request = self._pending_requests.get(request_id)
+            if not request:
+                return False, "Request not found", None
 
-        if request.status != ApprovalStatus.APPROVED:
-            return False, f"Request is {request.status.value}", None
+            if request.status != ApprovalStatus.APPROVED:
+                return False, f"Request is {request.status.value}", None
 
-        now = datetime.now(timezone.utc)
+            now = datetime.now(timezone.utc)
 
-        # Check time delay
-        if now < request.executable_at:
-            wait_seconds = (request.executable_at - now).total_seconds()
-            return False, f"Request not yet executable. Wait {int(wait_seconds)} seconds", None
+            # Check time delay
+            if now < request.executable_at:
+                wait_seconds = (request.executable_at - now).total_seconds()
+                return False, f"Request not yet executable. Wait {int(wait_seconds)} seconds", None
 
-        # Execute
+            # Execute (release lock during execution to avoid blocking)
+            request_copy = request
+
+        # Execute outside the lock to avoid blocking other operations
         try:
-            result = await executor_callback(request.operation_details)
+            result = await executor_callback(request_copy.operation_details)
 
-            request.status = ApprovalStatus.EXECUTED
-            request.executed_at = now
-            request.execution_result = {"success": True, "result": str(result)}
+            async with self._lock:
+                request = self._pending_requests.get(request_id)
+                if request:
+                    request.status = ApprovalStatus.EXECUTED
+                    request.executed_at = datetime.now(timezone.utc)
+                    request.execution_result = {"success": True, "result": str(result)}
 
-            # Move to completed
-            self._completed_requests.append(request)
-            del self._pending_requests[request_id]
-            self._save_state()
+                    # Move to completed
+                    self._completed_requests.append(request)
+                    del self._pending_requests[request_id]
+                    self._save_state()
 
             logger.info(f"Request {request_id} executed successfully")
 
             return True, "Executed successfully", result
 
         except Exception as e:
-            request.execution_result = {"success": False, "error": str(e)}
-            self._save_state()
+            async with self._lock:
+                request = self._pending_requests.get(request_id)
+                if request:
+                    request.execution_result = {"success": False, "error": str(e)}
+                    self._save_state()
 
             logger.error(f"Request {request_id} execution failed: {e}")
             return False, f"Execution failed: {e}", None
@@ -592,42 +609,44 @@ class ApprovalWorkflowEngine:
 
         Only the requester or admin can cancel.
         """
-        request = self._pending_requests.get(request_id)
-        if not request:
-            return False, "Request not found"
+        async with self._lock:
+            request = self._pending_requests.get(request_id)
+            if not request:
+                return False, "Request not found"
 
-        if request.status != ApprovalStatus.PENDING:
-            return False, f"Request is {request.status.value}"
+            if request.status != ApprovalStatus.PENDING:
+                return False, f"Request is {request.status.value}"
 
-        if canceller_id != request.requester_id:
-            # Check if admin
-            # For now, allow any cancellation with reason
-            pass
+            if canceller_id != request.requester_id:
+                # Check if admin
+                # For now, allow any cancellation with reason
+                pass
 
-        request.status = ApprovalStatus.CANCELLED
-        self._save_state()
-
-        logger.info(f"Request {request_id} cancelled by {canceller_id}: {reason}")
-
-        return True, "Request cancelled"
-
-    def cleanup_expired(self):
-        """Clean up expired requests"""
-        now = datetime.now(timezone.utc)
-        expired = []
-
-        for request_id, request in self._pending_requests.items():
-            if request.status == ApprovalStatus.PENDING and now > request.expires_at:
-                request.status = ApprovalStatus.EXPIRED
-                expired.append(request_id)
-
-        for request_id in expired:
-            self._completed_requests.append(self._pending_requests[request_id])
-            del self._pending_requests[request_id]
-
-        if expired:
+            request.status = ApprovalStatus.CANCELLED
             self._save_state()
-            logger.info(f"Cleaned up {len(expired)} expired requests")
+
+            logger.info(f"Request {request_id} cancelled by {canceller_id}: {reason}")
+
+            return True, "Request cancelled"
+
+    async def cleanup_expired(self):
+        """Clean up expired requests with thread-safe locking"""
+        async with self._lock:
+            now = datetime.now(timezone.utc)
+            expired = []
+
+            for request_id, request in self._pending_requests.items():
+                if request.status == ApprovalStatus.PENDING and now > request.expires_at:
+                    request.status = ApprovalStatus.EXPIRED
+                    expired.append(request_id)
+
+            for request_id in expired:
+                self._completed_requests.append(self._pending_requests[request_id])
+                del self._pending_requests[request_id]
+
+            if expired:
+                self._save_state()
+                logger.info(f"Cleaned up {len(expired)} expired requests")
 
 
 class TradeApprovalMiddleware:
