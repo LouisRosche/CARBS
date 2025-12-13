@@ -199,3 +199,304 @@ class RedisCache:
         if self.client:
             await self.client.close()
             logger.info("Redis cache connection closed")
+
+    async def sadd(self, key: str, *values) -> int:
+        """Add values to a set"""
+        if not self.client:
+            return 0
+        try:
+            return await self.client.sadd(key, *values)
+        except Exception as e:
+            logger.warning(f"Redis sadd error for key {key}: {e}")
+            return 0
+
+    async def sismember(self, key: str, value: str) -> bool:
+        """Check if value is in set"""
+        if not self.client:
+            return False
+        try:
+            return await self.client.sismember(key, value)
+        except Exception as e:
+            logger.warning(f"Redis sismember error for key {key}: {e}")
+            return False
+
+    async def expire(self, key: str, ttl: int) -> bool:
+        """Set expiry on a key"""
+        if not self.client:
+            return False
+        try:
+            return await self.client.expire(key, ttl)
+        except Exception as e:
+            logger.warning(f"Redis expire error for key {key}: {e}")
+            return False
+
+    async def hset(self, key: str, field: str, value: str) -> int:
+        """Set a hash field"""
+        if not self.client:
+            return 0
+        try:
+            return await self.client.hset(key, field, value)
+        except Exception as e:
+            logger.warning(f"Redis hset error for key {key}: {e}")
+            return 0
+
+    async def hget(self, key: str, field: str) -> Optional[str]:
+        """Get a hash field"""
+        if not self.client:
+            return None
+        try:
+            return await self.client.hget(key, field)
+        except Exception as e:
+            logger.warning(f"Redis hget error for key {key}: {e}")
+            return None
+
+    async def hgetall(self, key: str) -> dict:
+        """Get all hash fields"""
+        if not self.client:
+            return {}
+        try:
+            return await self.client.hgetall(key)
+        except Exception as e:
+            logger.warning(f"Redis hgetall error for key {key}: {e}")
+            return {}
+
+    async def hdel(self, key: str, *fields) -> int:
+        """Delete hash fields"""
+        if not self.client:
+            return 0
+        try:
+            return await self.client.hdel(key, *fields)
+        except Exception as e:
+            logger.warning(f"Redis hdel error for key {key}: {e}")
+            return 0
+
+
+class TokenBlacklist:
+    """
+    Redis-backed JWT token blacklist for immediate token revocation.
+
+    Uses a set to store revoked token IDs with automatic expiry
+    matching the token's remaining lifetime.
+    """
+
+    BLACKLIST_KEY = "carbs:token:blacklist"
+    SESSION_PREFIX = "carbs:session:"
+
+    def __init__(self, redis_cache: RedisCache):
+        self.cache = redis_cache
+
+    async def revoke_token(
+        self,
+        token_id: str,
+        remaining_ttl_seconds: int = 3600
+    ) -> bool:
+        """
+        Add a token to the blacklist.
+
+        Args:
+            token_id: The token's unique ID (jti claim or session_id)
+            remaining_ttl_seconds: How long to keep in blacklist (match token expiry)
+
+        Returns:
+            True if successfully added
+        """
+        if not self.cache.client:
+            logger.warning("Redis not available for token blacklist")
+            return False
+
+        try:
+            # Use a key per token with expiry
+            blacklist_key = f"{self.BLACKLIST_KEY}:{token_id}"
+            await self.cache.set(blacklist_key, {"revoked": True}, ttl=remaining_ttl_seconds)
+            logger.info(f"Token {token_id[:8]}... added to blacklist")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to blacklist token: {e}")
+            return False
+
+    async def is_revoked(self, token_id: str) -> bool:
+        """
+        Check if a token is blacklisted.
+
+        Args:
+            token_id: The token's unique ID
+
+        Returns:
+            True if token is revoked
+        """
+        if not self.cache.client:
+            # Fail open if Redis unavailable (log warning)
+            logger.warning("Redis not available - cannot check token blacklist")
+            return False
+
+        try:
+            blacklist_key = f"{self.BLACKLIST_KEY}:{token_id}"
+            data = await self.cache.get(blacklist_key)
+            return data is not None and data.get("revoked", False)
+        except Exception as e:
+            logger.error(f"Failed to check token blacklist: {e}")
+            return False
+
+    async def revoke_all_user_tokens(
+        self,
+        user_id: str,
+        session_ids: list,
+        ttl_seconds: int = 3600
+    ) -> int:
+        """
+        Revoke all tokens for a user.
+
+        Args:
+            user_id: User whose tokens to revoke
+            session_ids: List of session IDs to revoke
+            ttl_seconds: TTL for blacklist entries
+
+        Returns:
+            Number of tokens revoked
+        """
+        count = 0
+        for session_id in session_ids:
+            if await self.revoke_token(session_id, ttl_seconds):
+                count += 1
+
+        logger.info(f"Revoked {count} tokens for user {user_id}")
+        return count
+
+
+class SessionStore:
+    """
+    Redis-backed session storage for persistent sessions.
+
+    Replaces in-memory session storage to survive restarts
+    and enable horizontal scaling.
+    """
+
+    SESSION_PREFIX = "carbs:session:"
+    USER_SESSIONS_PREFIX = "carbs:user_sessions:"
+
+    def __init__(self, redis_cache: RedisCache):
+        self.cache = redis_cache
+
+    async def store_session(
+        self,
+        session_id: str,
+        session_data: dict,
+        ttl_seconds: int = 28800  # 8 hours default
+    ) -> bool:
+        """
+        Store a session in Redis.
+
+        Args:
+            session_id: Unique session identifier
+            session_data: Session data dictionary
+            ttl_seconds: Session TTL
+
+        Returns:
+            True if successfully stored
+        """
+        if not self.cache.client:
+            return False
+
+        try:
+            key = f"{self.SESSION_PREFIX}{session_id}"
+            await self.cache.set(key, session_data, ttl=ttl_seconds)
+
+            # Also track sessions by user for bulk operations
+            user_id = session_data.get('user_id')
+            if user_id:
+                user_key = f"{self.USER_SESSIONS_PREFIX}{user_id}"
+                await self.cache.sadd(user_key, session_id)
+                await self.cache.expire(user_key, ttl_seconds)
+
+            return True
+        except Exception as e:
+            logger.error(f"Failed to store session: {e}")
+            return False
+
+    async def get_session(self, session_id: str) -> Optional[dict]:
+        """
+        Retrieve a session from Redis.
+
+        Args:
+            session_id: Session ID to retrieve
+
+        Returns:
+            Session data or None if not found
+        """
+        if not self.cache.client:
+            return None
+
+        try:
+            key = f"{self.SESSION_PREFIX}{session_id}"
+            return await self.cache.get(key)
+        except Exception as e:
+            logger.error(f"Failed to retrieve session: {e}")
+            return None
+
+    async def delete_session(self, session_id: str) -> bool:
+        """
+        Delete a session from Redis.
+
+        Args:
+            session_id: Session ID to delete
+
+        Returns:
+            True if successfully deleted
+        """
+        if not self.cache.client:
+            return False
+
+        try:
+            key = f"{self.SESSION_PREFIX}{session_id}"
+            await self.cache.delete(key)
+            return True
+        except Exception as e:
+            logger.error(f"Failed to delete session: {e}")
+            return False
+
+    async def get_user_sessions(self, user_id: str) -> list:
+        """
+        Get all session IDs for a user.
+
+        Args:
+            user_id: User ID
+
+        Returns:
+            List of session IDs
+        """
+        if not self.cache.client:
+            return []
+
+        try:
+            user_key = f"{self.USER_SESSIONS_PREFIX}{user_id}"
+            # Get all members of the set
+            members = await self.cache.client.smembers(user_key)
+            return list(members) if members else []
+        except Exception as e:
+            logger.error(f"Failed to get user sessions: {e}")
+            return []
+
+    async def extend_session(
+        self,
+        session_id: str,
+        new_ttl_seconds: int
+    ) -> bool:
+        """
+        Extend a session's TTL.
+
+        Args:
+            session_id: Session to extend
+            new_ttl_seconds: New TTL
+
+        Returns:
+            True if successful
+        """
+        if not self.cache.client:
+            return False
+
+        try:
+            key = f"{self.SESSION_PREFIX}{session_id}"
+            return await self.cache.expire(key, new_ttl_seconds)
+        except Exception as e:
+            logger.error(f"Failed to extend session: {e}")
+            return False

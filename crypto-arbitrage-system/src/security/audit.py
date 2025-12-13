@@ -413,6 +413,202 @@ class AuditLogger:
             severity=severity
         )
 
+    def log_token_revocation(
+        self,
+        username: str,
+        session_id: str,
+        reason: str,
+        ip_address: str = 'system',
+        bulk: bool = False
+    ):
+        """Log JWT/session token revocation"""
+        self.log(
+            category=AuditCategory.SECURITY,
+            action='token_revocation',
+            actor=username,
+            resource='session',
+            actor_ip=ip_address,
+            details={
+                'session_id': session_id[:8] + '...' if len(session_id) > 8 else session_id,
+                'reason': reason,
+                'bulk_operation': bulk
+            },
+            severity=AuditSeverity.WARNING
+        )
+
+    def log_ip_spoofing_attempt(
+        self,
+        claimed_ip: str,
+        actual_ip: str,
+        x_forwarded_for: str,
+        request_path: str
+    ):
+        """Log potential IP spoofing attempt"""
+        self.log(
+            category=AuditCategory.SECURITY,
+            action='ip_spoofing_attempt',
+            actor='unknown',
+            resource=request_path,
+            actor_ip=actual_ip,
+            details={
+                'claimed_ip': claimed_ip,
+                'actual_ip': actual_ip,
+                'x_forwarded_for': x_forwarded_for
+            },
+            severity=AuditSeverity.CRITICAL,
+            success=False,
+            error_message='Potential IP spoofing detected'
+        )
+
+    def log_request_signature_failure(
+        self,
+        path: str,
+        ip_address: str,
+        reason: str,
+        user_id: Optional[str] = None
+    ):
+        """Log request signature verification failure"""
+        self.log(
+            category=AuditCategory.SECURITY,
+            action='signature_verification_failed',
+            actor=user_id or 'unknown',
+            resource=path,
+            actor_ip=ip_address,
+            details={'reason': reason},
+            severity=AuditSeverity.WARNING,
+            success=False,
+            error_message=reason
+        )
+
+    def log_rate_limit_exceeded(
+        self,
+        identifier: str,
+        limit_type: str,
+        endpoint: str,
+        ip_address: str
+    ):
+        """Log rate limit exceeded event"""
+        self.log(
+            category=AuditCategory.SECURITY,
+            action='rate_limit_exceeded',
+            actor=identifier,
+            resource=endpoint,
+            actor_ip=ip_address,
+            details={
+                'limit_type': limit_type,  # 'ip', 'user', 'endpoint'
+                'identifier': identifier
+            },
+            severity=AuditSeverity.WARNING
+        )
+
+    def log_approval_request(
+        self,
+        requester: str,
+        request_id: str,
+        approval_type: str,
+        operation_details: Dict[str, Any],
+        ip_address: str = 'system'
+    ):
+        """Log approval workflow request creation"""
+        self.log(
+            category=AuditCategory.SECURITY,
+            action='approval_request_created',
+            actor=requester,
+            resource=f'approval:{request_id}',
+            actor_ip=ip_address,
+            details={
+                'request_id': request_id,
+                'approval_type': approval_type,
+                'operation_summary': str(operation_details)[:200]
+            }
+        )
+
+    def log_approval_decision(
+        self,
+        approver: str,
+        request_id: str,
+        decision: str,
+        reason: str,
+        ip_address: str = 'system'
+    ):
+        """Log approval/rejection decision"""
+        self.log(
+            category=AuditCategory.SECURITY,
+            action=f'approval_{decision}',
+            actor=approver,
+            resource=f'approval:{request_id}',
+            actor_ip=ip_address,
+            details={
+                'request_id': request_id,
+                'decision': decision,
+                'reason': reason
+            },
+            severity=AuditSeverity.WARNING if decision == 'rejected' else AuditSeverity.INFO
+        )
+
+    def log_approval_execution(
+        self,
+        request_id: str,
+        approval_type: str,
+        success: bool,
+        error: Optional[str] = None
+    ):
+        """Log approval workflow execution"""
+        self.log(
+            category=AuditCategory.SECURITY,
+            action='approval_executed',
+            actor='system',
+            resource=f'approval:{request_id}',
+            details={
+                'request_id': request_id,
+                'approval_type': approval_type
+            },
+            success=success,
+            error_message=error,
+            severity=AuditSeverity.ERROR if not success else AuditSeverity.INFO
+        )
+
+    def log_session_created(
+        self,
+        username: str,
+        session_id: str,
+        ip_address: str,
+        user_agent: str,
+        mfa_verified: bool = False
+    ):
+        """Log new session creation"""
+        self.log(
+            category=AuditCategory.AUTH,
+            action='session_created',
+            actor=username,
+            resource='session',
+            actor_ip=ip_address,
+            details={
+                'session_id': session_id[:8] + '...',
+                'user_agent': user_agent[:100],
+                'mfa_verified': mfa_verified
+            }
+        )
+
+    def log_permission_denied(
+        self,
+        username: str,
+        resource: str,
+        required_permission: str,
+        ip_address: str
+    ):
+        """Log access denied event"""
+        self.log(
+            category=AuditCategory.ACCESS,
+            action='permission_denied',
+            actor=username,
+            resource=resource,
+            actor_ip=ip_address,
+            details={'required_permission': required_permission},
+            success=False,
+            severity=AuditSeverity.WARNING
+        )
+
     def log_system_event(
         self,
         action: str,

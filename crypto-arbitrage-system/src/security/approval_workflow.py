@@ -42,6 +42,7 @@ class ApprovalStatus(Enum):
     REJECTED = "rejected"
     EXPIRED = "expired"
     CANCELLED = "cancelled"
+    EXECUTING = "executing"  # In-progress execution (prevents race conditions)
     EXECUTED = "executed"
 
 
@@ -507,6 +508,9 @@ class ApprovalWorkflowEngine:
         """
         Execute approved request if ready
 
+        Uses EXECUTING status to prevent race conditions where multiple
+        callers might try to execute the same request concurrently.
+
         Returns:
             (success: bool, message: str, result: Any)
         """
@@ -514,6 +518,13 @@ class ApprovalWorkflowEngine:
             request = self._pending_requests.get(request_id)
             if not request:
                 return False, "Request not found", None
+
+            # Check if already being executed (race condition prevention)
+            if request.status == ApprovalStatus.EXECUTING:
+                return False, "Request is already being executed", None
+
+            if request.status == ApprovalStatus.EXECUTED:
+                return False, "Request has already been executed", None
 
             if request.status != ApprovalStatus.APPROVED:
                 return False, f"Request is {request.status.value}", None
@@ -525,12 +536,17 @@ class ApprovalWorkflowEngine:
                 wait_seconds = (request.executable_at - now).total_seconds()
                 return False, f"Request not yet executable. Wait {int(wait_seconds)} seconds", None
 
-            # Execute (release lock during execution to avoid blocking)
-            request_copy = request
+            # Mark as EXECUTING to prevent concurrent execution attempts
+            # This is the critical race condition fix
+            request.status = ApprovalStatus.EXECUTING
+            self._save_state()
+
+            # Copy operation details for use outside the lock
+            operation_details = dict(request.operation_details)
 
         # Execute outside the lock to avoid blocking other operations
         try:
-            result = await executor_callback(request_copy.operation_details)
+            result = await executor_callback(operation_details)
 
             async with self._lock:
                 request = self._pending_requests.get(request_id)
@@ -552,6 +568,8 @@ class ApprovalWorkflowEngine:
             async with self._lock:
                 request = self._pending_requests.get(request_id)
                 if request:
+                    # Revert to APPROVED so it can be retried
+                    request.status = ApprovalStatus.APPROVED
                     request.execution_result = {"success": False, "error": str(e)}
                     self._save_state()
 
