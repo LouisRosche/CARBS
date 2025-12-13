@@ -48,7 +48,8 @@ class RateLimiter:
     """
     Token bucket rate limiter with multiple windows
 
-    Prevents abuse while allowing legitimate bursts
+    Prevents abuse while allowing legitimate bursts.
+    Supports both IP-based and user-based rate limiting.
     """
 
     def __init__(self, config: RateLimitConfig = None):
@@ -106,6 +107,88 @@ class RateLimiter:
 
         return True, None
 
+    def cleanup_old_entries(self):
+        """Periodically cleanup old entries to prevent memory bloat"""
+        now = time.time()
+        for buckets, window in [
+            (self._second_buckets, 1),
+            (self._minute_buckets, 60),
+            (self._hour_buckets, 3600)
+        ]:
+            keys_to_remove = []
+            for key in buckets:
+                buckets[key] = self._cleanup_bucket(buckets[key], window)
+                if not buckets[key]:
+                    keys_to_remove.append(key)
+            for key in keys_to_remove:
+                del buckets[key]
+
+
+class UserRateLimiter:
+    """
+    Per-user rate limiter that works alongside IP-based limiting.
+
+    Provides additional protection against authenticated users making
+    excessive requests from multiple IPs.
+    """
+
+    def __init__(self):
+        # Different limits for authenticated users (more generous than IP)
+        self._user_configs: Dict[str, RateLimitConfig] = {}
+        self._user_limiters: Dict[str, RateLimiter] = {}
+
+        # Default limits for authenticated users
+        self._default_config = RateLimitConfig(
+            requests_per_minute=120,  # 2x IP limit
+            requests_per_hour=2000,   # 2x IP limit
+            burst_limit=20            # 2x IP limit
+        )
+
+        # Stricter limits for sensitive operations
+        self._sensitive_config = RateLimitConfig(
+            requests_per_minute=10,
+            requests_per_hour=50,
+            burst_limit=3
+        )
+
+    def get_limiter(self, user_id: str) -> RateLimiter:
+        """Get or create rate limiter for a user"""
+        if user_id not in self._user_limiters:
+            config = self._user_configs.get(user_id, self._default_config)
+            self._user_limiters[user_id] = RateLimiter(config)
+        return self._user_limiters[user_id]
+
+    def check_limit(self, user_id: str, sensitive: bool = False) -> tuple:
+        """
+        Check rate limit for an authenticated user.
+
+        Args:
+            user_id: The user's ID
+            sensitive: If True, use stricter limits for sensitive operations
+
+        Returns:
+            (allowed: bool, retry_after: Optional[int])
+        """
+        if sensitive:
+            # Use a separate limiter for sensitive operations
+            sensitive_key = f"{user_id}:sensitive"
+            if sensitive_key not in self._user_limiters:
+                self._user_limiters[sensitive_key] = RateLimiter(self._sensitive_config)
+            return self._user_limiters[sensitive_key].check_limit(user_id)
+
+        return self.get_limiter(user_id).check_limit(user_id)
+
+    def set_user_config(self, user_id: str, config: RateLimitConfig):
+        """Set custom rate limit config for a specific user"""
+        self._user_configs[user_id] = config
+        if user_id in self._user_limiters:
+            self._user_limiters[user_id] = RateLimiter(config)
+
+    def cleanup(self):
+        """Cleanup old entries in all user limiters"""
+        for limiter in self._user_limiters.values():
+            limiter.cleanup_old_entries()
+
 
 class SecurityMiddleware:
     """
@@ -140,6 +223,14 @@ class SecurityMiddleware:
     # Maximum request body size (1MB)
     MAX_BODY_SIZE = 1024 * 1024
 
+    # Sensitive endpoints that require stricter rate limiting
+    SENSITIVE_ENDPOINTS = {
+        '/api/v1/trade/execute',
+        '/api/v1/emergency/stop',
+        '/api/v1/emergency/resume',
+        '/api/v1/config/update',
+    }
+
     def __init__(
         self,
         auth_manager=None,
@@ -159,6 +250,7 @@ class SecurityMiddleware:
         self.audit_logger = audit_logger
 
         self.rate_limiter = RateLimiter()
+        self.user_rate_limiter = UserRateLimiter()  # Per-user rate limiting
         self.ip_whitelist: Set[str] = set()
         self.ip_blacklist: Set[str] = set()
 
@@ -205,6 +297,54 @@ class SecurityMiddleware:
             limiter = self.rate_limiter
 
         return limiter.check_limit(key)
+
+    def check_user_rate_limit(self, user_id: str, endpoint: str) -> tuple:
+        """
+        Check rate limit for an authenticated user.
+
+        Applies both IP and user-based rate limiting for defense in depth.
+
+        Args:
+            user_id: The authenticated user's ID
+            endpoint: The API endpoint being accessed
+
+        Returns:
+            (allowed: bool, retry_after: Optional[int])
+        """
+        is_sensitive = endpoint in self.SENSITIVE_ENDPOINTS
+        return self.user_rate_limiter.check_limit(user_id, sensitive=is_sensitive)
+
+    def check_combined_rate_limit(
+        self,
+        ip_address: str,
+        user_id: Optional[str],
+        endpoint: str
+    ) -> tuple:
+        """
+        Check both IP and user rate limits.
+
+        Both must pass for the request to be allowed.
+
+        Args:
+            ip_address: Client IP address
+            user_id: Authenticated user ID (None if not authenticated)
+            endpoint: API endpoint being accessed
+
+        Returns:
+            (allowed: bool, retry_after: Optional[int], limit_type: str)
+        """
+        # Check IP rate limit first
+        ip_allowed, ip_retry = self.check_rate_limit(ip_address, endpoint)
+        if not ip_allowed:
+            return False, ip_retry, "ip"
+
+        # Check user rate limit if authenticated
+        if user_id:
+            user_allowed, user_retry = self.check_user_rate_limit(user_id, endpoint)
+            if not user_allowed:
+                return False, user_retry, "user"
+
+        return True, None, None
 
     def verify_token(self, token: str) -> Optional[RequestContext]:
         """

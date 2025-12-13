@@ -364,3 +364,355 @@ def verify_password(password: str, password_hash: bytes, salt: bytes) -> bool:
         return True
     except Exception:
         return False
+
+
+class SecretsProvider:
+    """
+    Abstract base class for secrets providers.
+
+    Allows integration with external secrets management systems
+    like HashiCorp Vault, AWS Secrets Manager, Azure Key Vault, etc.
+    """
+
+    def get_secret(self, key: str, default: Optional[str] = None) -> Optional[str]:
+        """Get a secret by key"""
+        raise NotImplementedError
+
+    def set_secret(self, key: str, value: str) -> None:
+        """Set a secret"""
+        raise NotImplementedError
+
+    def delete_secret(self, key: str) -> bool:
+        """Delete a secret"""
+        raise NotImplementedError
+
+    def list_secrets(self) -> list:
+        """List all secret keys"""
+        raise NotImplementedError
+
+
+class EnvironmentSecretsProvider(SecretsProvider):
+    """
+    Secrets provider that reads from environment variables.
+
+    Useful for container deployments where secrets are injected via env vars.
+    """
+
+    def __init__(self, prefix: str = "CARBS_SECRET_"):
+        self.prefix = prefix
+
+    def get_secret(self, key: str, default: Optional[str] = None) -> Optional[str]:
+        env_key = f"{self.prefix}{key.upper()}"
+        return os.getenv(env_key, default)
+
+    def set_secret(self, key: str, value: str) -> None:
+        # Environment variables are read-only at runtime
+        logger.warning(f"Cannot set environment variable {key} at runtime")
+
+    def delete_secret(self, key: str) -> bool:
+        logger.warning(f"Cannot delete environment variable {key} at runtime")
+        return False
+
+    def list_secrets(self) -> list:
+        return [
+            k[len(self.prefix):].lower()
+            for k in os.environ
+            if k.startswith(self.prefix)
+        ]
+
+
+class VaultSecretsProvider(SecretsProvider):
+    """
+    HashiCorp Vault secrets provider.
+
+    Requires: pip install hvac
+
+    Configuration via environment variables:
+    - VAULT_ADDR: Vault server address
+    - VAULT_TOKEN: Authentication token
+    - VAULT_SECRET_PATH: Path to secrets (default: secret/data/carbs)
+    """
+
+    def __init__(
+        self,
+        vault_addr: Optional[str] = None,
+        vault_token: Optional[str] = None,
+        secret_path: str = "secret/data/carbs"
+    ):
+        self.vault_addr = vault_addr or os.getenv('VAULT_ADDR', 'http://127.0.0.1:8200')
+        self.vault_token = vault_token or os.getenv('VAULT_TOKEN')
+        self.secret_path = os.getenv('VAULT_SECRET_PATH', secret_path)
+        self._client = None
+
+    def _get_client(self):
+        """Get or create Vault client"""
+        if self._client:
+            return self._client
+
+        try:
+            import hvac
+            self._client = hvac.Client(url=self.vault_addr, token=self.vault_token)
+            if not self._client.is_authenticated():
+                raise EncryptionError("Vault authentication failed")
+            logger.info(f"Connected to Vault at {self.vault_addr}")
+            return self._client
+        except ImportError:
+            raise EncryptionError("hvac package required for Vault integration. Install with: pip install hvac")
+
+    def get_secret(self, key: str, default: Optional[str] = None) -> Optional[str]:
+        try:
+            client = self._get_client()
+            result = client.secrets.kv.v2.read_secret_version(path=self.secret_path)
+            return result['data']['data'].get(key, default)
+        except Exception as e:
+            logger.warning(f"Failed to get secret {key} from Vault: {e}")
+            return default
+
+    def set_secret(self, key: str, value: str) -> None:
+        try:
+            client = self._get_client()
+            # Read existing secrets
+            try:
+                result = client.secrets.kv.v2.read_secret_version(path=self.secret_path)
+                data = result['data']['data']
+            except Exception:
+                data = {}
+
+            data[key] = value
+            client.secrets.kv.v2.create_or_update_secret(path=self.secret_path, secret=data)
+            logger.info(f"Secret {key} stored in Vault")
+        except Exception as e:
+            raise EncryptionError(f"Failed to set secret in Vault: {e}")
+
+    def delete_secret(self, key: str) -> bool:
+        try:
+            client = self._get_client()
+            result = client.secrets.kv.v2.read_secret_version(path=self.secret_path)
+            data = result['data']['data']
+            if key in data:
+                del data[key]
+                client.secrets.kv.v2.create_or_update_secret(path=self.secret_path, secret=data)
+                return True
+            return False
+        except Exception as e:
+            logger.warning(f"Failed to delete secret {key} from Vault: {e}")
+            return False
+
+    def list_secrets(self) -> list:
+        try:
+            client = self._get_client()
+            result = client.secrets.kv.v2.read_secret_version(path=self.secret_path)
+            return list(result['data']['data'].keys())
+        except Exception:
+            return []
+
+
+class AWSSecretsProvider(SecretsProvider):
+    """
+    AWS Secrets Manager provider.
+
+    Requires: pip install boto3
+
+    Configuration via environment variables:
+    - AWS_REGION: AWS region
+    - AWS_SECRET_NAME: Name of the secret in AWS Secrets Manager
+    """
+
+    def __init__(
+        self,
+        region: Optional[str] = None,
+        secret_name: str = "carbs/secrets"
+    ):
+        self.region = region or os.getenv('AWS_REGION', 'us-east-1')
+        self.secret_name = os.getenv('AWS_SECRET_NAME', secret_name)
+        self._client = None
+        self._cache: Dict[str, str] = {}
+
+    def _get_client(self):
+        """Get or create AWS Secrets Manager client"""
+        if self._client:
+            return self._client
+
+        try:
+            import boto3
+            self._client = boto3.client('secretsmanager', region_name=self.region)
+            logger.info(f"Connected to AWS Secrets Manager in {self.region}")
+            return self._client
+        except ImportError:
+            raise EncryptionError("boto3 package required for AWS integration. Install with: pip install boto3")
+
+    def _load_secrets(self) -> Dict[str, str]:
+        """Load all secrets from AWS"""
+        if self._cache:
+            return self._cache
+
+        try:
+            client = self._get_client()
+            response = client.get_secret_value(SecretId=self.secret_name)
+            self._cache = json.loads(response['SecretString'])
+            return self._cache
+        except Exception as e:
+            logger.warning(f"Failed to load secrets from AWS: {e}")
+            return {}
+
+    def _save_secrets(self, data: Dict[str, str]) -> None:
+        """Save secrets to AWS"""
+        try:
+            client = self._get_client()
+            client.put_secret_value(
+                SecretId=self.secret_name,
+                SecretString=json.dumps(data)
+            )
+            self._cache = data
+        except Exception as e:
+            raise EncryptionError(f"Failed to save secrets to AWS: {e}")
+
+    def get_secret(self, key: str, default: Optional[str] = None) -> Optional[str]:
+        secrets = self._load_secrets()
+        return secrets.get(key, default)
+
+    def set_secret(self, key: str, value: str) -> None:
+        secrets = self._load_secrets()
+        secrets[key] = value
+        self._save_secrets(secrets)
+        logger.info(f"Secret {key} stored in AWS Secrets Manager")
+
+    def delete_secret(self, key: str) -> bool:
+        secrets = self._load_secrets()
+        if key in secrets:
+            del secrets[key]
+            self._save_secrets(secrets)
+            return True
+        return False
+
+    def list_secrets(self) -> list:
+        return list(self._load_secrets().keys())
+
+
+class UnifiedSecretsManager:
+    """
+    Unified secrets manager that can use multiple backends.
+
+    Supports fallback chain: tries providers in order until secret is found.
+
+    Usage:
+        manager = UnifiedSecretsManager()
+        manager.add_provider(VaultSecretsProvider())
+        manager.add_provider(EnvironmentSecretsProvider())
+        manager.add_provider(SecretsManager())  # Local encrypted fallback
+
+        secret = manager.get_secret('api_key')
+    """
+
+    def __init__(self):
+        self._providers: list = []
+        self._primary_provider: Optional[SecretsProvider] = None
+
+    def add_provider(self, provider: SecretsProvider, primary: bool = False):
+        """
+        Add a secrets provider to the chain.
+
+        Args:
+            provider: The secrets provider to add
+            primary: If True, this provider is used for writes
+        """
+        self._providers.append(provider)
+        if primary or self._primary_provider is None:
+            self._primary_provider = provider
+
+    def get_secret(self, key: str, default: Optional[str] = None) -> Optional[str]:
+        """
+        Get a secret, trying each provider in order.
+        """
+        for provider in self._providers:
+            try:
+                value = provider.get_secret(key)
+                if value is not None:
+                    return value
+            except Exception as e:
+                logger.debug(f"Provider {type(provider).__name__} failed: {e}")
+                continue
+        return default
+
+    def set_secret(self, key: str, value: str) -> None:
+        """
+        Set a secret using the primary provider.
+        """
+        if self._primary_provider:
+            self._primary_provider.set_secret(key, value)
+        else:
+            raise EncryptionError("No primary secrets provider configured")
+
+    def delete_secret(self, key: str) -> bool:
+        """
+        Delete a secret from the primary provider.
+        """
+        if self._primary_provider:
+            return self._primary_provider.delete_secret(key)
+        return False
+
+    def list_secrets(self) -> list:
+        """
+        List all secrets from all providers (deduplicated).
+        """
+        all_keys = set()
+        for provider in self._providers:
+            try:
+                all_keys.update(provider.list_secrets())
+            except Exception:
+                continue
+        return list(all_keys)
+
+    @classmethod
+    def from_environment(cls) -> 'UnifiedSecretsManager':
+        """
+        Create a secrets manager based on environment configuration.
+
+        Checks for:
+        - VAULT_ADDR: Use HashiCorp Vault
+        - AWS_SECRET_NAME: Use AWS Secrets Manager
+        - CARBS_MASTER_KEY: Use local encrypted storage
+        - Falls back to environment variables
+        """
+        manager = cls()
+
+        # Try Vault first
+        if os.getenv('VAULT_ADDR'):
+            try:
+                manager.add_provider(VaultSecretsProvider(), primary=True)
+                logger.info("Using HashiCorp Vault for secrets")
+            except Exception as e:
+                logger.warning(f"Vault not available: {e}")
+
+        # Try AWS Secrets Manager
+        if os.getenv('AWS_SECRET_NAME'):
+            try:
+                manager.add_provider(AWSSecretsProvider(), primary=not manager._providers)
+                logger.info("Using AWS Secrets Manager for secrets")
+            except Exception as e:
+                logger.warning(f"AWS Secrets Manager not available: {e}")
+
+        # Try local encrypted storage
+        if os.getenv('CARBS_MASTER_KEY'):
+            try:
+                manager.add_provider(SecretsManager(), primary=not manager._providers)
+                logger.info("Using local encrypted storage for secrets")
+            except Exception as e:
+                logger.warning(f"Local secrets manager not available: {e}")
+
+        # Always add environment variables as fallback
+        manager.add_provider(EnvironmentSecretsProvider())
+
+        return manager
+
+
+# Global instance for convenience
+_secrets_manager: Optional[UnifiedSecretsManager] = None
+
+
+def get_secrets_manager() -> UnifiedSecretsManager:
+    """Get or create the global secrets manager instance."""
+    global _secrets_manager
+    if _secrets_manager is None:
+        _secrets_manager = UnifiedSecretsManager.from_environment()
+    return _secrets_manager

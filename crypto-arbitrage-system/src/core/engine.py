@@ -51,14 +51,73 @@ class OrderBook:
     timestamp: datetime
     bids: List[Tuple[Decimal, Decimal]]  # [(price, volume), ...]
     asks: List[Tuple[Decimal, Decimal]]
-    
+
     @property
     def best_bid(self) -> Tuple[Decimal, Decimal]:
         return self.bids[0] if self.bids else (Decimal('0'), Decimal('0'))
-    
+
     @property
     def best_ask(self) -> Tuple[Decimal, Decimal]:
         return self.asks[0] if self.asks else (Decimal('0'), Decimal('0'))
+
+    def estimate_slippage(self, side: str, position_size_usd: Decimal) -> Decimal:
+        """
+        Estimate slippage based on orderbook depth for a given position size.
+
+        Args:
+            side: 'buy' or 'sell'
+            position_size_usd: Size of the position in USD
+
+        Returns:
+            Estimated slippage as a decimal (e.g., 0.001 = 0.1%)
+        """
+        if position_size_usd <= 0:
+            return Decimal('0')
+
+        orders = self.asks if side == 'buy' else self.bids
+
+        if not orders:
+            return Decimal('0.005')  # Default 50 bps if no orderbook
+
+        best_price = orders[0][0]
+        if best_price <= 0:
+            return Decimal('0.005')
+
+        # Calculate volume-weighted average price for the position
+        remaining_usd = position_size_usd
+        total_value = Decimal('0')
+        total_qty = Decimal('0')
+
+        for price, qty in orders:
+            level_value_usd = price * qty
+            if remaining_usd <= level_value_usd:
+                # Partial fill at this level
+                fill_qty = remaining_usd / price
+                total_value += fill_qty * price
+                total_qty += fill_qty
+                break
+            else:
+                # Full fill at this level
+                total_value += level_value_usd
+                total_qty += qty
+                remaining_usd -= level_value_usd
+
+        if total_qty == 0:
+            return Decimal('0.005')  # Default 50 bps
+
+        vwap = total_value / total_qty
+
+        # Slippage is the difference between VWAP and best price
+        if side == 'buy':
+            slippage = (vwap - best_price) / best_price
+        else:
+            slippage = (best_price - vwap) / best_price
+
+        # Ensure non-negative and cap at reasonable maximum
+        slippage = max(Decimal('0'), slippage)
+        slippage = min(slippage, Decimal('0.02'))  # Cap at 2%
+
+        return slippage
 
 
 class ArbitrageEngine:
@@ -197,53 +256,58 @@ class ArbitrageEngine:
             return None
     
     def calculate_spread(
-        self, 
-        buy_ob: OrderBook, 
+        self,
+        buy_ob: OrderBook,
         sell_ob: OrderBook,
         position_size_usd: Decimal
     ) -> Optional[Opportunity]:
         """
         Calculate transaction-cost adjusted spread
-        
+
         Incorporates:
         - Trading fees (taker assumed for speed)
-        - Estimated slippage based on orderbook depth
+        - Dynamic slippage estimation based on orderbook depth
         - Minimum profitability threshold
         """
         # Get best prices
         buy_price, buy_volume = buy_ob.best_ask
         sell_price, sell_volume = sell_ob.best_bid
-        
+
         if buy_price == 0 or sell_price == 0:
             return None
-        
+
         # Calculate gross spread
         gross_spread = (sell_price - buy_price) / buy_price
         spread_percent = gross_spread * 100
         spread_bps = gross_spread * 10000
-        
+
         # Get exchange fees
         buy_fee = Decimal(str(self.config.exchanges[buy_ob.exchange].get('taker_fee', 0.001)))
         sell_fee = Decimal(str(self.config.exchanges[sell_ob.exchange].get('taker_fee', 0.001)))
-        
-        # Estimate slippage (simplistic model, can be improved)
-        estimated_slippage = Decimal('0.0005')  # 5 bps
-        
+
+        # Dynamic slippage estimation based on orderbook depth
+        buy_slippage = buy_ob.estimate_slippage('buy', position_size_usd)
+        sell_slippage = sell_ob.estimate_slippage('sell', position_size_usd)
+        estimated_slippage = buy_slippage + sell_slippage
+
         # Calculate net spread after costs
         net_spread = gross_spread - buy_fee - sell_fee - estimated_slippage
-        
+
         # Check minimum profitability
         if net_spread < self.min_spread:
             return None
-        
+
         # Reject suspiciously high spreads (likely stale data)
         if gross_spread > self.max_spread:
             logger.warning(f"Rejecting suspicious spread: {spread_percent:.2f}%")
             return None
-        
+
         # Calculate estimated profit
         estimated_profit = position_size_usd * net_spread
-        
+
+        # Calculate confidence score based on liquidity and spread stability
+        confidence_score = self._calculate_confidence(buy_ob, sell_ob, position_size_usd)
+
         opportunity = Opportunity(
             symbol=buy_ob.symbol,
             buy_exchange=buy_ob.exchange,
@@ -257,10 +321,50 @@ class ArbitrageEngine:
             buy_fee_percent=buy_fee * 100,
             sell_fee_percent=sell_fee * 100,
             slippage_estimate=estimated_slippage * 100,
-            detected_at=datetime.now(timezone.utc)
+            detected_at=datetime.now(timezone.utc),
+            confidence_score=confidence_score
         )
-        
+
         return opportunity
+
+    def _calculate_confidence(
+        self,
+        buy_ob: OrderBook,
+        sell_ob: OrderBook,
+        position_size_usd: Decimal
+    ) -> float:
+        """
+        Calculate confidence score for an arbitrage opportunity.
+
+        Based on:
+        - Orderbook depth (liquidity)
+        - Spread size relative to slippage
+        - Number of price levels available
+
+        Returns:
+            Confidence score between 0 and 1
+        """
+        try:
+            # Liquidity score (0-0.4): Based on available volume at best prices
+            buy_volume_usd = buy_ob.best_ask[0] * buy_ob.best_ask[1]
+            sell_volume_usd = sell_ob.best_bid[0] * sell_ob.best_bid[1]
+            min_volume = min(float(buy_volume_usd), float(sell_volume_usd))
+            liquidity_ratio = min(min_volume / float(position_size_usd), 5.0) / 5.0
+            liquidity_score = liquidity_ratio * 0.4
+
+            # Depth score (0-0.3): Based on number of price levels
+            buy_depth = min(len(buy_ob.asks), 10) / 10.0
+            sell_depth = min(len(sell_ob.bids), 10) / 10.0
+            depth_score = ((buy_depth + sell_depth) / 2) * 0.3
+
+            # Slippage score (0-0.3): Lower slippage = higher confidence
+            total_slippage = float(buy_ob.estimate_slippage('buy', position_size_usd) +
+                                   sell_ob.estimate_slippage('sell', position_size_usd))
+            slippage_score = max(0, 1 - total_slippage * 100) * 0.3
+
+            return min(liquidity_score + depth_score + slippage_score, 1.0)
+        except Exception:
+            return 0.5  # Default moderate confidence
     
     async def find_arbitrage(self, symbol: str) -> Optional[Opportunity]:
         """

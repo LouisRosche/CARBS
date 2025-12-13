@@ -74,6 +74,56 @@ services:
       - arbitrage_network
     restart: unless-stopped
 
+  # Database backup service - runs daily backups
+  db-backup:
+    image: prodrigestivill/postgres-backup-local:16
+    container_name: arbitrage_db_backup
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_DB: ${POSTGRES_DB:-arbitrage}
+      POSTGRES_USER: ${POSTGRES_USER:-arbitrage_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_EXTRA_OPTS: "-Z6 --schema=public --blobs"
+      SCHEDULE: "@daily"
+      BACKUP_KEEP_DAYS: 7
+      BACKUP_KEEP_WEEKS: 4
+      BACKUP_KEEP_MONTHS: 6
+      HEALTHCHECK_PORT: 8080
+    volumes:
+      - ./backups/postgres:/backups
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - arbitrage_network
+    restart: unless-stopped
+
+  # Redis backup service - periodic RDB snapshots
+  redis-backup:
+    image: redis:7-alpine
+    container_name: arbitrage_redis_backup
+    entrypoint: /bin/sh
+    command: >
+      -c 'while true; do
+        echo "Starting Redis backup at $$(date)";
+        redis-cli -h redis -a $${REDIS_PASSWORD} BGSAVE;
+        sleep 5;
+        cp /data/dump.rdb /backups/redis-$$(date +%Y%m%d-%H%M%S).rdb;
+        find /backups -name "redis-*.rdb" -mtime +7 -delete;
+        echo "Backup complete, sleeping for 6 hours";
+        sleep 21600;
+      done'
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+    volumes:
+      - redis_data:/data:ro
+      - ./backups/redis:/backups
+    depends_on:
+      - redis
+    networks:
+      - arbitrage_network
+    restart: unless-stopped
+
 volumes:
   postgres_data:
   redis_data:

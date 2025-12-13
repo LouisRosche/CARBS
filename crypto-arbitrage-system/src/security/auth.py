@@ -26,8 +26,37 @@ import jwt
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 from cryptography.hazmat.backends import default_backend
+from cryptography.fernet import Fernet, InvalidToken
 
 logger = logging.getLogger(__name__)
+
+
+def _get_user_data_key() -> bytes:
+    """
+    Derive encryption key for user data from master key or generate a stable one.
+    Uses PBKDF2 with a fixed salt for reproducibility.
+    """
+    master_key = os.getenv('CARBS_MASTER_KEY', os.getenv('CARBS_JWT_SECRET', ''))
+    if not master_key:
+        # Generate a stable key based on machine-specific info
+        import socket
+        machine_id = f"carbs-{socket.gethostname()}-user-data"
+        master_key = machine_id
+        logger.warning("No CARBS_MASTER_KEY set. Using machine-based key for user data encryption.")
+
+    # Fixed salt for user data encryption (reproducibility required)
+    salt = b'CARBS_USER_DATA_ENCRYPTION_SALT_'
+
+    kdf = PBKDF2HMAC(
+        algorithm=hashes.SHA256(),
+        length=32,
+        salt=salt,
+        iterations=480_000,
+        backend=default_backend()
+    )
+
+    import base64
+    return base64.urlsafe_b64encode(kdf.derive(master_key.encode()))
 
 
 class AuthError(Exception):
@@ -197,13 +226,12 @@ class AuthenticationManager:
         Args:
             jwt_secret: Secret for JWT signing (generated if not provided)
         """
+        self._jwt_secret_file = 'data/.jwt_secret'
         self._jwt_secret = jwt_secret or os.getenv('CARBS_JWT_SECRET')
+
         if not self._jwt_secret:
-            self._jwt_secret = secrets.token_urlsafe(64)
-            logger.warning(
-                "JWT secret not configured. Generated temporary secret. "
-                "Set CARBS_JWT_SECRET for persistent sessions."
-            )
+            # Try to load persisted JWT secret
+            self._jwt_secret = self._load_or_create_jwt_secret()
 
         self._users: Dict[str, User] = {}
         self._sessions: Dict[str, Session] = {}
@@ -213,31 +241,83 @@ class AuthenticationManager:
         self._users_file = 'data/.users.json'
         self._load_users()
 
+    def _load_or_create_jwt_secret(self) -> str:
+        """
+        Load persisted JWT secret or create a new one.
+        Ensures JWT secrets persist across restarts.
+        """
+        os.makedirs(os.path.dirname(self._jwt_secret_file), exist_ok=True)
+
+        if os.path.exists(self._jwt_secret_file):
+            try:
+                # Read encrypted JWT secret
+                with open(self._jwt_secret_file, 'rb') as f:
+                    encrypted_data = f.read()
+
+                fernet = Fernet(_get_user_data_key())
+                jwt_secret = fernet.decrypt(encrypted_data).decode()
+                logger.info("Loaded persisted JWT secret")
+                return jwt_secret
+            except Exception as e:
+                logger.warning(f"Could not load JWT secret: {e}. Generating new one.")
+
+        # Generate new JWT secret and persist it
+        jwt_secret = secrets.token_urlsafe(64)
+
+        try:
+            fernet = Fernet(_get_user_data_key())
+            encrypted_secret = fernet.encrypt(jwt_secret.encode())
+            with open(self._jwt_secret_file, 'wb') as f:
+                f.write(encrypted_secret)
+            os.chmod(self._jwt_secret_file, 0o600)
+            logger.info("Generated and persisted new JWT secret")
+        except Exception as e:
+            logger.warning(f"Could not persist JWT secret: {e}")
+
+        return jwt_secret
+
     def _load_users(self):
         """Load users from encrypted storage"""
         try:
             if os.path.exists(self._users_file):
-                with open(self._users_file, 'r') as f:
-                    data = json.load(f)
-                    for user_data in data:
-                        user = User(
-                            user_id=user_data['user_id'],
-                            username=user_data['username'],
-                            password_hash=base64.b64decode(user_data['password_hash']),
-                            password_salt=base64.b64decode(user_data['password_salt']),
-                            totp_secret=user_data.get('totp_secret'),
-                            totp_enabled=user_data.get('totp_enabled', False),
-                            role=user_data.get('role', 'viewer'),
-                            failed_attempts=user_data.get('failed_attempts', 0),
-                            created_at=datetime.fromisoformat(user_data['created_at'])
-                        )
-                        self._users[user.username] = user
-                logger.info(f"Loaded {len(self._users)} users")
+                with open(self._users_file, 'rb') as f:
+                    encrypted_data = f.read()
+
+                # Decrypt user data
+                try:
+                    fernet = Fernet(_get_user_data_key())
+                    decrypted_data = fernet.decrypt(encrypted_data)
+                    data = json.loads(decrypted_data.decode())
+                except InvalidToken:
+                    # Try loading as legacy unencrypted JSON for migration
+                    logger.warning("Attempting legacy unencrypted user data migration...")
+                    try:
+                        with open(self._users_file, 'r') as f:
+                            data = json.load(f)
+                        # Will be re-encrypted on next save
+                        logger.info("Legacy user data loaded, will be encrypted on next save")
+                    except Exception:
+                        raise
+
+                for user_data in data:
+                    user = User(
+                        user_id=user_data['user_id'],
+                        username=user_data['username'],
+                        password_hash=base64.b64decode(user_data['password_hash']),
+                        password_salt=base64.b64decode(user_data['password_salt']),
+                        totp_secret=user_data.get('totp_secret'),
+                        totp_enabled=user_data.get('totp_enabled', False),
+                        role=user_data.get('role', 'viewer'),
+                        failed_attempts=user_data.get('failed_attempts', 0),
+                        created_at=datetime.fromisoformat(user_data['created_at'])
+                    )
+                    self._users[user.username] = user
+                logger.info(f"Loaded {len(self._users)} users from encrypted storage")
         except Exception as e:
             logger.warning(f"Could not load users: {e}")
 
     def _save_users(self):
-        """Save users to encrypted storage"""
+        """Save users to encrypted storage with Fernet encryption"""
         os.makedirs(os.path.dirname(self._users_file), exist_ok=True)
         data = []
         for user in self._users.values():
@@ -253,9 +333,15 @@ class AuthenticationManager:
                 'created_at': user.created_at.isoformat()
             })
 
-        with open(self._users_file, 'w') as f:
-            json.dump(data, f)
+        # Encrypt the user data before writing
+        json_data = json.dumps(data).encode()
+        fernet = Fernet(_get_user_data_key())
+        encrypted_data = fernet.encrypt(json_data)
+
+        with open(self._users_file, 'wb') as f:
+            f.write(encrypted_data)
         os.chmod(self._users_file, 0o600)
+        logger.debug(f"Saved {len(data)} users to encrypted storage")
 
     def _hash_password(self, password: str) -> tuple:
         """Hash password with PBKDF2"""
