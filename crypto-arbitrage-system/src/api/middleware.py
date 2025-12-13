@@ -5,20 +5,254 @@ Implements:
 - JWT authentication
 - Rate limiting per endpoint
 - Request logging
-- IP filtering
+- IP filtering with X-Forwarded-For validation
 - CORS controls
 - Request size limits
+- Request signing verification
 """
 
+import os
 import time
+import hmac
+import hashlib
 import logging
 import functools
-from typing import Dict, Optional, Callable, Set
+import ipaddress
+from typing import Dict, Optional, Callable, Set, List
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from collections import defaultdict
 
 logger = logging.getLogger(__name__)
+
+
+# Trusted proxy networks (configure via environment)
+# Default: localhost, Docker networks, common cloud provider ranges
+TRUSTED_PROXY_NETWORKS = [
+    ipaddress.ip_network('127.0.0.0/8'),      # Localhost
+    ipaddress.ip_network('10.0.0.0/8'),       # Private network
+    ipaddress.ip_network('172.16.0.0/12'),    # Docker default
+    ipaddress.ip_network('192.168.0.0/16'),   # Private network
+]
+
+
+def _load_trusted_proxies() -> List[ipaddress.IPv4Network | ipaddress.IPv6Network]:
+    """Load trusted proxy networks from environment"""
+    networks = list(TRUSTED_PROXY_NETWORKS)
+
+    custom_proxies = os.getenv('TRUSTED_PROXIES', '')
+    if custom_proxies:
+        for proxy in custom_proxies.split(','):
+            proxy = proxy.strip()
+            if proxy:
+                try:
+                    networks.append(ipaddress.ip_network(proxy, strict=False))
+                except ValueError as e:
+                    logger.warning(f"Invalid trusted proxy network '{proxy}': {e}")
+
+    return networks
+
+
+class TrustedProxyValidator:
+    """
+    Validates X-Forwarded-For headers to prevent IP spoofing.
+
+    Only trusts X-Forwarded-For if the immediate connection is from a trusted proxy.
+    Implements proper header parsing to extract the real client IP.
+    """
+
+    def __init__(self, trusted_networks: List = None):
+        self.trusted_networks = trusted_networks or _load_trusted_proxies()
+        logger.info(f"Loaded {len(self.trusted_networks)} trusted proxy networks")
+
+    def is_trusted_proxy(self, ip: str) -> bool:
+        """Check if an IP is from a trusted proxy"""
+        try:
+            addr = ipaddress.ip_address(ip)
+            for network in self.trusted_networks:
+                if addr in network:
+                    return True
+            return False
+        except ValueError:
+            logger.warning(f"Invalid IP address: {ip}")
+            return False
+
+    def get_real_client_ip(
+        self,
+        direct_ip: str,
+        x_forwarded_for: Optional[str] = None,
+        x_real_ip: Optional[str] = None
+    ) -> str:
+        """
+        Extract the real client IP from proxy headers.
+
+        Only trusts proxy headers if the direct connection is from a trusted proxy.
+        Uses rightmost-untrusted strategy to prevent spoofing.
+
+        Args:
+            direct_ip: IP of the direct TCP connection
+            x_forwarded_for: X-Forwarded-For header value
+            x_real_ip: X-Real-IP header value
+
+        Returns:
+            The real client IP address
+        """
+        # If direct connection is not from a trusted proxy, use direct IP
+        if not self.is_trusted_proxy(direct_ip):
+            logger.debug(f"Direct IP {direct_ip} not from trusted proxy, using as client IP")
+            return direct_ip
+
+        # Parse X-Forwarded-For (format: client, proxy1, proxy2, ...)
+        if x_forwarded_for:
+            # Split and clean IPs
+            forwarded_ips = [ip.strip() for ip in x_forwarded_for.split(',')]
+
+            # Rightmost-untrusted strategy: walk from right to left
+            # Stop at the first untrusted IP (that's the real client)
+            for ip in reversed(forwarded_ips):
+                if ip and not self.is_trusted_proxy(ip):
+                    # Validate it's a proper IP address
+                    try:
+                        ipaddress.ip_address(ip)
+                        return ip
+                    except ValueError:
+                        logger.warning(f"Invalid IP in X-Forwarded-For: {ip}")
+                        continue
+
+            # All IPs in chain are trusted, use the leftmost
+            if forwarded_ips and forwarded_ips[0]:
+                try:
+                    ipaddress.ip_address(forwarded_ips[0])
+                    return forwarded_ips[0]
+                except ValueError:
+                    pass
+
+        # Fall back to X-Real-IP if present
+        if x_real_ip:
+            try:
+                ipaddress.ip_address(x_real_ip)
+                return x_real_ip
+            except ValueError:
+                logger.warning(f"Invalid X-Real-IP: {x_real_ip}")
+
+        # Last resort: use direct IP
+        return direct_ip
+
+
+class RequestSigner:
+    """
+    HMAC-SHA256 request signing for API integrity.
+
+    Prevents request tampering and replay attacks.
+    """
+
+    SIGNATURE_HEADER = 'X-CARBS-Signature'
+    TIMESTAMP_HEADER = 'X-CARBS-Timestamp'
+    NONCE_HEADER = 'X-CARBS-Nonce'
+
+    # Maximum age of a signed request (5 minutes)
+    MAX_REQUEST_AGE_SECONDS = 300
+
+    def __init__(self, secret_key: Optional[str] = None):
+        self._secret_key = secret_key or os.getenv('CARBS_REQUEST_SIGNING_KEY', '')
+        if not self._secret_key:
+            logger.warning("No request signing key configured. Request signing disabled.")
+
+        # Nonce cache to prevent replay attacks (store with timestamp for cleanup)
+        self._used_nonces: Dict[str, float] = {}
+
+    def _cleanup_nonces(self):
+        """Remove expired nonces"""
+        cutoff = time.time() - (self.MAX_REQUEST_AGE_SECONDS * 2)
+        self._used_nonces = {
+            nonce: ts for nonce, ts in self._used_nonces.items()
+            if ts > cutoff
+        }
+
+    def sign_request(
+        self,
+        method: str,
+        path: str,
+        body: bytes = b'',
+        timestamp: Optional[int] = None,
+        nonce: Optional[str] = None
+    ) -> Dict[str, str]:
+        """
+        Generate signature headers for a request.
+
+        Returns:
+            Dict with signature headers to add to request
+        """
+        if not self._secret_key:
+            return {}
+
+        import secrets
+        timestamp = timestamp or int(time.time())
+        nonce = nonce or secrets.token_urlsafe(16)
+
+        # Create signature payload
+        payload = f"{method}\n{path}\n{timestamp}\n{nonce}\n".encode() + body
+
+        signature = hmac.new(
+            self._secret_key.encode(),
+            payload,
+            hashlib.sha256
+        ).hexdigest()
+
+        return {
+            self.SIGNATURE_HEADER: signature,
+            self.TIMESTAMP_HEADER: str(timestamp),
+            self.NONCE_HEADER: nonce
+        }
+
+    def verify_request(
+        self,
+        method: str,
+        path: str,
+        body: bytes,
+        signature: str,
+        timestamp: str,
+        nonce: str
+    ) -> tuple:
+        """
+        Verify a signed request.
+
+        Returns:
+            (valid: bool, error: Optional[str])
+        """
+        if not self._secret_key:
+            # Signing disabled, accept all requests
+            return True, None
+
+        # Check timestamp freshness
+        try:
+            ts = int(timestamp)
+            age = abs(time.time() - ts)
+            if age > self.MAX_REQUEST_AGE_SECONDS:
+                return False, f"Request too old ({int(age)}s)"
+        except ValueError:
+            return False, "Invalid timestamp"
+
+        # Check nonce hasn't been used (replay protection)
+        self._cleanup_nonces()
+        if nonce in self._used_nonces:
+            return False, "Nonce already used (replay attack?)"
+
+        # Verify signature
+        payload = f"{method}\n{path}\n{timestamp}\n{nonce}\n".encode() + body
+        expected = hmac.new(
+            self._secret_key.encode(),
+            payload,
+            hashlib.sha256
+        ).hexdigest()
+
+        if not hmac.compare_digest(signature, expected):
+            return False, "Invalid signature"
+
+        # Record nonce as used
+        self._used_nonces[nonce] = time.time()
+
+        return True, None
 
 
 @dataclass
@@ -197,9 +431,10 @@ class SecurityMiddleware:
     Handles:
     - Authentication verification
     - Rate limiting
-    - IP filtering
+    - IP filtering with X-Forwarded-For validation
     - Request logging
     - Security headers
+    - Request signature verification
     """
 
     # Default security headers
@@ -207,10 +442,12 @@ class SecurityMiddleware:
         'X-Content-Type-Options': 'nosniff',
         'X-Frame-Options': 'DENY',
         'X-XSS-Protection': '1; mode=block',
-        'Strict-Transport-Security': 'max-age=31536000; includeSubDomains',
+        'Strict-Transport-Security': 'max-age=31536000; includeSubDomains; preload',
         'Content-Security-Policy': "default-src 'self'",
         'Cache-Control': 'no-store',
-        'Pragma': 'no-cache'
+        'Pragma': 'no-cache',
+        'X-Permitted-Cross-Domain-Policies': 'none',
+        'Referrer-Policy': 'strict-origin-when-cross-origin'
     }
 
     # Endpoints that don't require authentication
@@ -231,11 +468,21 @@ class SecurityMiddleware:
         '/api/v1/config/update',
     }
 
+    # Endpoints that require request signing
+    SIGNED_ENDPOINTS = {
+        '/api/v1/trade/execute',
+        '/api/v1/config/update',
+        '/api/v1/emergency/stop',
+        '/api/v1/emergency/resume',
+        '/api/v1/keys/rotate',
+    }
+
     def __init__(
         self,
         auth_manager=None,
         access_control=None,
-        audit_logger=None
+        audit_logger=None,
+        require_signed_requests: bool = None
     ):
         """
         Initialize middleware
@@ -244,6 +491,7 @@ class SecurityMiddleware:
             auth_manager: Authentication manager instance
             access_control: Access control instance
             audit_logger: Audit logger instance
+            require_signed_requests: Require HMAC signatures on sensitive endpoints
         """
         self.auth_manager = auth_manager
         self.access_control = access_control
@@ -253,6 +501,17 @@ class SecurityMiddleware:
         self.user_rate_limiter = UserRateLimiter()  # Per-user rate limiting
         self.ip_whitelist: Set[str] = set()
         self.ip_blacklist: Set[str] = set()
+
+        # IP spoofing protection
+        self.proxy_validator = TrustedProxyValidator()
+
+        # Request signing
+        self.request_signer = RequestSigner()
+        self.require_signed_requests = (
+            require_signed_requests
+            if require_signed_requests is not None
+            else os.getenv('REQUIRE_SIGNED_REQUESTS', 'false').lower() == 'true'
+        )
 
         # Per-endpoint rate limits
         self.endpoint_limits: Dict[str, RateLimitConfig] = {
@@ -408,6 +667,66 @@ class SecurityMiddleware:
     def is_public_endpoint(self, path: str) -> bool:
         """Check if endpoint is public (no auth required)"""
         return path in self.PUBLIC_ENDPOINTS
+
+    def get_client_ip(
+        self,
+        direct_ip: str,
+        x_forwarded_for: Optional[str] = None,
+        x_real_ip: Optional[str] = None
+    ) -> str:
+        """
+        Get real client IP with X-Forwarded-For validation.
+
+        Only trusts proxy headers from trusted proxy networks.
+
+        Args:
+            direct_ip: Direct TCP connection IP
+            x_forwarded_for: X-Forwarded-For header value
+            x_real_ip: X-Real-IP header value
+
+        Returns:
+            Real client IP address
+        """
+        return self.proxy_validator.get_real_client_ip(
+            direct_ip, x_forwarded_for, x_real_ip
+        )
+
+    def verify_request_signature(
+        self,
+        method: str,
+        path: str,
+        body: bytes,
+        headers: Dict[str, str]
+    ) -> tuple:
+        """
+        Verify request signature for sensitive endpoints.
+
+        Args:
+            method: HTTP method
+            path: Request path
+            body: Request body
+            headers: Request headers
+
+        Returns:
+            (valid: bool, error: Optional[str])
+        """
+        # Check if signature required for this endpoint
+        if path not in self.SIGNED_ENDPOINTS:
+            return True, None
+
+        if not self.require_signed_requests:
+            return True, None
+
+        signature = headers.get(RequestSigner.SIGNATURE_HEADER)
+        timestamp = headers.get(RequestSigner.TIMESTAMP_HEADER)
+        nonce = headers.get(RequestSigner.NONCE_HEADER)
+
+        if not all([signature, timestamp, nonce]):
+            return False, "Missing signature headers"
+
+        return self.request_signer.verify_request(
+            method, path, body, signature, timestamp, nonce
+        )
 
 
 def require_api_auth(required_permission=None):

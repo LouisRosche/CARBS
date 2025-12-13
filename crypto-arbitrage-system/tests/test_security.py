@@ -6,19 +6,25 @@ Tests:
 - Encryption (secrets management, key rotation)
 - Approval workflow (thread safety, state transitions)
 - Rate limiting
+- IP spoofing protection
+- Request signing
+- Token blacklist
+- Session persistence
 """
 
 import pytest
 import asyncio
 import os
+import time
 import tempfile
 import shutil
 from datetime import datetime, timezone, timedelta
-from unittest.mock import Mock, patch, MagicMock
+from unittest.mock import Mock, patch, MagicMock, AsyncMock
 
 # Set up test environment
 os.environ['CARBS_MASTER_KEY'] = 'test_master_key_12345'
 os.environ['CARBS_JWT_SECRET'] = 'test_jwt_secret_12345'
+os.environ['CARBS_REQUEST_SIGNING_KEY'] = 'test_signing_key_12345'
 
 
 class TestPasswordHashing:
@@ -484,3 +490,360 @@ class TestSecureToken:
 
         tokens = [generate_secure_token() for _ in range(100)]
         assert len(set(tokens)) == 100
+
+
+class TestTrustedProxyValidator:
+    """Test IP spoofing protection"""
+
+    def test_is_trusted_proxy_localhost(self):
+        """Should trust localhost"""
+        from api.middleware import TrustedProxyValidator
+
+        validator = TrustedProxyValidator()
+        assert validator.is_trusted_proxy('127.0.0.1') is True
+        assert validator.is_trusted_proxy('127.0.0.50') is True
+
+    def test_is_trusted_proxy_private_network(self):
+        """Should trust private networks by default"""
+        from api.middleware import TrustedProxyValidator
+
+        validator = TrustedProxyValidator()
+        assert validator.is_trusted_proxy('10.0.0.1') is True
+        assert validator.is_trusted_proxy('192.168.1.1') is True
+        assert validator.is_trusted_proxy('172.16.0.1') is True
+
+    def test_is_trusted_proxy_public_ip(self):
+        """Should not trust public IPs"""
+        from api.middleware import TrustedProxyValidator
+
+        validator = TrustedProxyValidator()
+        assert validator.is_trusted_proxy('8.8.8.8') is False
+        assert validator.is_trusted_proxy('203.0.113.1') is False
+
+    def test_get_real_client_ip_direct_connection(self):
+        """Should use direct IP when not from trusted proxy"""
+        from api.middleware import TrustedProxyValidator
+
+        validator = TrustedProxyValidator()
+        # Direct connection from public IP - ignore X-Forwarded-For
+        result = validator.get_real_client_ip(
+            direct_ip='8.8.8.8',
+            x_forwarded_for='1.2.3.4, 5.6.7.8'
+        )
+        assert result == '8.8.8.8'
+
+    def test_get_real_client_ip_from_proxy(self):
+        """Should extract client IP from X-Forwarded-For when from proxy"""
+        from api.middleware import TrustedProxyValidator
+
+        validator = TrustedProxyValidator()
+        # Connection from trusted proxy - use X-Forwarded-For
+        result = validator.get_real_client_ip(
+            direct_ip='10.0.0.1',
+            x_forwarded_for='203.0.113.50, 10.0.0.5'
+        )
+        assert result == '203.0.113.50'
+
+    def test_get_real_client_ip_rightmost_untrusted(self):
+        """Should use rightmost untrusted IP"""
+        from api.middleware import TrustedProxyValidator
+
+        validator = TrustedProxyValidator()
+        # Multiple proxies in chain
+        result = validator.get_real_client_ip(
+            direct_ip='127.0.0.1',
+            x_forwarded_for='1.2.3.4, 5.6.7.8, 10.0.0.1'
+        )
+        # Should get 5.6.7.8 (rightmost untrusted)
+        assert result == '5.6.7.8'
+
+    def test_get_real_client_ip_invalid_ip(self):
+        """Should handle invalid IPs gracefully"""
+        from api.middleware import TrustedProxyValidator
+
+        validator = TrustedProxyValidator()
+        result = validator.get_real_client_ip(
+            direct_ip='10.0.0.1',
+            x_forwarded_for='not_an_ip, also_invalid'
+        )
+        # Should fall back to direct IP
+        assert result == '10.0.0.1'
+
+
+class TestRequestSigner:
+    """Test HMAC-SHA256 request signing"""
+
+    def test_sign_request_generates_headers(self):
+        """Should generate signature headers"""
+        from api.middleware import RequestSigner
+
+        signer = RequestSigner(secret_key='test_secret')
+        headers = signer.sign_request('POST', '/api/v1/trade', b'{"amount": 100}')
+
+        assert 'X-CARBS-Signature' in headers
+        assert 'X-CARBS-Timestamp' in headers
+        assert 'X-CARBS-Nonce' in headers
+
+    def test_verify_request_valid_signature(self):
+        """Should verify valid signatures"""
+        from api.middleware import RequestSigner
+
+        signer = RequestSigner(secret_key='test_secret')
+
+        # Sign a request
+        body = b'{"amount": 100}'
+        headers = signer.sign_request('POST', '/api/v1/trade', body)
+
+        # Verify it
+        valid, error = signer.verify_request(
+            'POST',
+            '/api/v1/trade',
+            body,
+            headers['X-CARBS-Signature'],
+            headers['X-CARBS-Timestamp'],
+            headers['X-CARBS-Nonce']
+        )
+
+        assert valid is True
+        assert error is None
+
+    def test_verify_request_invalid_signature(self):
+        """Should reject invalid signatures"""
+        from api.middleware import RequestSigner
+
+        signer = RequestSigner(secret_key='test_secret')
+
+        valid, error = signer.verify_request(
+            'POST',
+            '/api/v1/trade',
+            b'{"amount": 100}',
+            'invalid_signature',
+            str(int(time.time())),
+            'some_nonce'
+        )
+
+        assert valid is False
+        assert 'Invalid signature' in error
+
+    def test_verify_request_replay_protection(self):
+        """Should reject replayed requests"""
+        from api.middleware import RequestSigner
+
+        signer = RequestSigner(secret_key='test_secret')
+
+        body = b'{"amount": 100}'
+        headers = signer.sign_request('POST', '/api/v1/trade', body)
+
+        # First request should succeed
+        valid1, _ = signer.verify_request(
+            'POST', '/api/v1/trade', body,
+            headers['X-CARBS-Signature'],
+            headers['X-CARBS-Timestamp'],
+            headers['X-CARBS-Nonce']
+        )
+        assert valid1 is True
+
+        # Replay should fail
+        valid2, error = signer.verify_request(
+            'POST', '/api/v1/trade', body,
+            headers['X-CARBS-Signature'],
+            headers['X-CARBS-Timestamp'],
+            headers['X-CARBS-Nonce']
+        )
+        assert valid2 is False
+        assert 'Nonce already used' in error
+
+    def test_verify_request_expired(self):
+        """Should reject old requests"""
+        from api.middleware import RequestSigner
+
+        signer = RequestSigner(secret_key='test_secret')
+
+        old_timestamp = str(int(time.time()) - 400)  # 400 seconds ago
+
+        valid, error = signer.verify_request(
+            'POST',
+            '/api/v1/trade',
+            b'{"amount": 100}',
+            'some_signature',
+            old_timestamp,
+            'some_nonce'
+        )
+
+        assert valid is False
+        assert 'Request too old' in error
+
+
+class TestApprovalWorkflowRaceCondition:
+    """Test approval workflow race condition prevention"""
+
+    @pytest.fixture
+    def temp_approval_dir(self):
+        """Create temporary directory for approval data"""
+        temp_dir = tempfile.mkdtemp()
+        yield temp_dir
+        shutil.rmtree(temp_dir)
+
+    @pytest.mark.asyncio
+    async def test_executing_status_prevents_double_execution(self, temp_approval_dir):
+        """Should prevent concurrent execution with EXECUTING status"""
+        from security.approval_workflow import (
+            ApprovalWorkflowEngine, ApprovalType, ApprovalStatus
+        )
+        from pathlib import Path
+
+        engine = ApprovalWorkflowEngine(data_dir=Path(temp_approval_dir))
+
+        # Create and approve request
+        request = await engine.create_request(
+            approval_type=ApprovalType.CONFIG_CHANGE,
+            requester_id="user1",
+            requester_role="admin",
+            operation_details={"setting": "value"},
+            reason="Test"
+        )
+
+        # Approve it
+        await engine.approve(
+            request_id=request.request_id,
+            approver_id="admin1",
+            approver_role="admin",
+            reason="Approved"
+        )
+
+        # Track execution attempts
+        execution_count = 0
+
+        async def slow_executor(details):
+            nonlocal execution_count
+            execution_count += 1
+            await asyncio.sleep(0.1)  # Simulate slow operation
+            return "done"
+
+        # Try to execute concurrently
+        results = await asyncio.gather(
+            engine.execute_if_ready(request.request_id, slow_executor),
+            engine.execute_if_ready(request.request_id, slow_executor),
+            engine.execute_if_ready(request.request_id, slow_executor),
+            return_exceptions=True
+        )
+
+        # Only one should succeed
+        successes = [r for r in results if isinstance(r, tuple) and r[0] is True]
+        assert len(successes) == 1
+        assert execution_count == 1  # Only executed once
+
+    @pytest.mark.asyncio
+    async def test_executing_status_in_enum(self):
+        """EXECUTING status should exist in ApprovalStatus"""
+        from security.approval_workflow import ApprovalStatus
+
+        assert hasattr(ApprovalStatus, 'EXECUTING')
+        assert ApprovalStatus.EXECUTING.value == 'executing'
+
+    @pytest.mark.asyncio
+    async def test_failed_execution_reverts_to_approved(self, temp_approval_dir):
+        """Failed execution should revert status to APPROVED"""
+        from security.approval_workflow import (
+            ApprovalWorkflowEngine, ApprovalType, ApprovalStatus
+        )
+        from pathlib import Path
+
+        engine = ApprovalWorkflowEngine(data_dir=Path(temp_approval_dir))
+
+        request = await engine.create_request(
+            approval_type=ApprovalType.CONFIG_CHANGE,
+            requester_id="user1",
+            requester_role="admin",
+            operation_details={"setting": "value"},
+            reason="Test"
+        )
+
+        await engine.approve(
+            request_id=request.request_id,
+            approver_id="admin1",
+            approver_role="admin",
+            reason="Approved"
+        )
+
+        async def failing_executor(details):
+            raise Exception("Simulated failure")
+
+        success, message, result = await engine.execute_if_ready(
+            request.request_id, failing_executor
+        )
+
+        assert success is False
+        assert "Execution failed" in message
+
+        # Request should be back to APPROVED for retry
+        updated_request = engine.get_request(request.request_id)
+        assert updated_request.status == ApprovalStatus.APPROVED
+
+
+class TestSecurityMiddleware:
+    """Test SecurityMiddleware integration"""
+
+    def test_middleware_has_proxy_validator(self):
+        """SecurityMiddleware should have proxy validator"""
+        from api.middleware import SecurityMiddleware
+
+        middleware = SecurityMiddleware()
+        assert hasattr(middleware, 'proxy_validator')
+        assert middleware.proxy_validator is not None
+
+    def test_middleware_has_request_signer(self):
+        """SecurityMiddleware should have request signer"""
+        from api.middleware import SecurityMiddleware
+
+        middleware = SecurityMiddleware()
+        assert hasattr(middleware, 'request_signer')
+        assert middleware.request_signer is not None
+
+    def test_get_client_ip_method(self):
+        """Should have get_client_ip method"""
+        from api.middleware import SecurityMiddleware
+
+        middleware = SecurityMiddleware()
+
+        # Test with direct connection
+        ip = middleware.get_client_ip('8.8.8.8', '1.2.3.4')
+        assert ip == '8.8.8.8'  # Public IP not trusted
+
+        # Test with trusted proxy
+        ip = middleware.get_client_ip('127.0.0.1', '1.2.3.4')
+        assert ip == '1.2.3.4'
+
+    def test_verify_request_signature_method(self):
+        """Should have verify_request_signature method"""
+        from api.middleware import SecurityMiddleware, RequestSigner
+
+        middleware = SecurityMiddleware(require_signed_requests=True)
+
+        # Missing headers should fail for signed endpoints
+        valid, error = middleware.verify_request_signature(
+            'POST',
+            '/api/v1/trade/execute',
+            b'{}',
+            {}
+        )
+        assert valid is False
+
+
+class TestAuditLogging:
+    """Test enhanced audit logging"""
+
+    def test_audit_logger_has_new_methods(self):
+        """Should have new audit logging methods"""
+        from security.audit import AuditLogger
+
+        # Check methods exist
+        assert hasattr(AuditLogger, 'log_token_revocation')
+        assert hasattr(AuditLogger, 'log_ip_spoofing_attempt')
+        assert hasattr(AuditLogger, 'log_request_signature_failure')
+        assert hasattr(AuditLogger, 'log_rate_limit_exceeded')
+        assert hasattr(AuditLogger, 'log_approval_request')
+        assert hasattr(AuditLogger, 'log_approval_decision')
+        assert hasattr(AuditLogger, 'log_approval_execution')
+        assert hasattr(AuditLogger, 'log_session_created')
+        assert hasattr(AuditLogger, 'log_permission_denied')

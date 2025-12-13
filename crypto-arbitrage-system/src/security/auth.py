@@ -219,12 +219,19 @@ class AuthenticationManager:
     SESSION_DURATION_HOURS = 8
     REFRESH_TOKEN_DAYS = 7
 
-    def __init__(self, jwt_secret: Optional[str] = None):
+    def __init__(
+        self,
+        jwt_secret: Optional[str] = None,
+        token_blacklist=None,
+        session_store=None
+    ):
         """
         Initialize authentication manager
 
         Args:
             jwt_secret: Secret for JWT signing (generated if not provided)
+            token_blacklist: Optional TokenBlacklist instance for Redis-backed revocation
+            session_store: Optional SessionStore instance for Redis-backed sessions
         """
         self._jwt_secret_file = 'data/.jwt_secret'
         self._jwt_secret = jwt_secret or os.getenv('CARBS_JWT_SECRET')
@@ -236,6 +243,12 @@ class AuthenticationManager:
         self._users: Dict[str, User] = {}
         self._sessions: Dict[str, Session] = {}
         self._ip_attempts: Dict[str, list] = {}  # IP -> list of attempt timestamps
+
+        # Redis-backed token blacklist for immediate revocation
+        self._token_blacklist = token_blacklist
+
+        # Redis-backed session store for persistence
+        self._session_store = session_store
 
         # Load users from file if exists
         self._users_file = 'data/.users.json'
@@ -590,6 +603,38 @@ class AuthenticationManager:
         self._sessions[session_id] = session
         return session
 
+    async def _create_session_async(
+        self,
+        user: User,
+        ip_address: str,
+        user_agent: str
+    ) -> Session:
+        """Create a new session with Redis storage"""
+        session = self._create_session(user, ip_address, user_agent)
+
+        # Store in Redis if available
+        if self._session_store:
+            session_data = {
+                'session_id': session.session_id,
+                'user_id': session.user_id,
+                'username': session.username,
+                'role': session.role,
+                'ip_address': session.ip_address,
+                'user_agent': session.user_agent,
+                'created_at': session.created_at.isoformat(),
+                'expires_at': session.expires_at.isoformat(),
+                'refresh_token': session.refresh_token,
+                'is_active': session.is_active
+            }
+            ttl = int((session.expires_at - datetime.now(timezone.utc)).total_seconds())
+            await self._session_store.store_session(
+                session.session_id,
+                session_data,
+                ttl_seconds=ttl
+            )
+
+        return session
+
     def create_jwt(self, session: Session) -> str:
         """Create JWT token for session"""
         payload = {
@@ -620,6 +665,74 @@ class AuthenticationManager:
             payload = jwt.decode(token, self._jwt_secret, algorithms=['HS256'])
             session_id = payload.get('session_id')
 
+            if session_id not in self._sessions:
+                raise TokenError("Session not found")
+
+            session = self._sessions[session_id]
+
+            if not session.is_active:
+                raise TokenError("Session revoked")
+
+            if session.is_expired():
+                raise TokenError("Session expired")
+
+            return session
+
+        except jwt.ExpiredSignatureError:
+            raise TokenError("Token expired")
+        except jwt.InvalidTokenError as e:
+            raise TokenError(f"Invalid token: {e}")
+
+    async def verify_jwt_async(self, token: str) -> Session:
+        """
+        Verify JWT with async blacklist check.
+
+        Use this method when Redis-backed token blacklist is available.
+
+        Args:
+            token: JWT token
+
+        Returns:
+            Valid session
+
+        Raises:
+            TokenError: If token is invalid, expired, or revoked
+        """
+        try:
+            payload = jwt.decode(token, self._jwt_secret, algorithms=['HS256'])
+            session_id = payload.get('session_id')
+
+            # Check token blacklist (Redis) for immediate revocation
+            if self._token_blacklist:
+                if await self._token_blacklist.is_revoked(session_id):
+                    raise TokenError("Token has been revoked")
+
+            # Check session store (Redis) first if available
+            if self._session_store:
+                session_data = await self._session_store.get_session(session_id)
+                if session_data:
+                    session = Session(
+                        session_id=session_data['session_id'],
+                        user_id=session_data['user_id'],
+                        username=session_data['username'],
+                        role=session_data['role'],
+                        ip_address=session_data['ip_address'],
+                        user_agent=session_data['user_agent'],
+                        created_at=datetime.fromisoformat(session_data['created_at']),
+                        expires_at=datetime.fromisoformat(session_data['expires_at']),
+                        refresh_token=session_data['refresh_token'],
+                        is_active=session_data.get('is_active', True)
+                    )
+
+                    if not session.is_active:
+                        raise TokenError("Session revoked")
+
+                    if session.is_expired():
+                        raise TokenError("Session expired")
+
+                    return session
+
+            # Fall back to in-memory sessions
             if session_id not in self._sessions:
                 raise TokenError("Session not found")
 
@@ -673,19 +786,78 @@ class AuthenticationManager:
         return self.create_jwt(session), session.refresh_token
 
     def revoke_session(self, session_id: str):
-        """Revoke a session"""
+        """Revoke a session (synchronous, in-memory only)"""
         if session_id in self._sessions:
             self._sessions[session_id].is_active = False
             logger.info(f"Session {session_id[:8]}... revoked")
 
+    async def revoke_session_async(self, session_id: str):
+        """
+        Revoke a session with Redis blacklist support.
+
+        Adds the session to the blacklist for immediate effect across all instances.
+        """
+        if session_id in self._sessions:
+            session = self._sessions[session_id]
+            session.is_active = False
+
+            # Calculate remaining TTL for blacklist entry
+            remaining_ttl = int((session.expires_at - datetime.now(timezone.utc)).total_seconds())
+            remaining_ttl = max(remaining_ttl, 60)  # At least 60 seconds
+
+            # Add to Redis blacklist
+            if self._token_blacklist:
+                await self._token_blacklist.revoke_token(session_id, remaining_ttl)
+
+            # Remove from Redis session store
+            if self._session_store:
+                await self._session_store.delete_session(session_id)
+
+            logger.info(f"Session {session_id[:8]}... revoked (blacklist + store)")
+        else:
+            # Session not in memory, but still blacklist it
+            if self._token_blacklist:
+                await self._token_blacklist.revoke_token(session_id, 3600)
+                logger.info(f"Session {session_id[:8]}... added to blacklist")
+
     def revoke_all_sessions(self, username: str):
-        """Revoke all sessions for a user"""
+        """Revoke all sessions for a user (synchronous)"""
         count = 0
         for session in self._sessions.values():
             if session.username == username:
                 session.is_active = False
                 count += 1
         logger.info(f"Revoked {count} sessions for user '{username}'")
+
+    async def revoke_all_sessions_async(self, username: str):
+        """
+        Revoke all sessions for a user with Redis support.
+
+        Adds all sessions to the blacklist for immediate effect.
+        """
+        count = 0
+        session_ids = []
+
+        for session in self._sessions.values():
+            if session.username == username:
+                session.is_active = False
+                session_ids.append(session.session_id)
+                count += 1
+
+        # Add all to blacklist
+        if self._token_blacklist and session_ids:
+            user = self._users.get(username)
+            if user:
+                await self._token_blacklist.revoke_all_user_tokens(
+                    user.user_id, session_ids, 3600
+                )
+
+        # Remove from session store
+        if self._session_store:
+            for session_id in session_ids:
+                await self._session_store.delete_session(session_id)
+
+        logger.info(f"Revoked {count} sessions for user '{username}' (with blacklist)")
 
     def get_user(self, username: str) -> Optional[User]:
         """Get user by username"""
