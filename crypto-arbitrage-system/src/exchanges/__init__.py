@@ -181,18 +181,34 @@ class BaseExchange(ABC):
     @abstractmethod
     def name(self) -> str:
         """Exchange name"""
-        pass
+        raise NotImplementedError(f"{self.__class__.__name__}.name not implemented")
 
     @property
     @abstractmethod
     def base_url(self) -> str:
         """API base URL"""
-        pass
+        raise NotImplementedError(f"{self.__class__.__name__}.base_url not implemented")
 
     async def _ensure_session(self):
-        """Ensure aiohttp session exists"""
+        """Ensure aiohttp session exists with proper security and limits"""
         if self._session is None or self._session.closed:
-            self._session = aiohttp.ClientSession()
+            # Configure connection limits to prevent resource exhaustion
+            connector = aiohttp.TCPConnector(
+                limit=100,              # Total connection limit
+                limit_per_host=30,      # Per-host limit
+                ssl=True,               # Enforce SSL verification
+                enable_cleanup_closed=True
+            )
+            # Configure timeouts to prevent hanging
+            timeout = aiohttp.ClientTimeout(
+                total=30,               # Total request timeout
+                connect=10,             # Connection timeout
+                sock_read=20            # Socket read timeout
+            )
+            self._session = aiohttp.ClientSession(
+                connector=connector,
+                timeout=timeout
+            )
 
     async def close(self):
         """Close connections"""
@@ -204,17 +220,17 @@ class BaseExchange(ABC):
     @abstractmethod
     async def get_ticker(self, symbol: str) -> Ticker:
         """Get current ticker"""
-        pass
+        raise NotImplementedError(f"{self.__class__.__name__}.get_ticker not implemented")
 
     @abstractmethod
     async def get_orderbook(self, symbol: str, depth: int = 20) -> OrderBook:
         """Get order book"""
-        pass
+        raise NotImplementedError(f"{self.__class__.__name__}.get_orderbook not implemented")
 
     @abstractmethod
     async def get_balances(self) -> Dict[str, Balance]:
         """Get account balances"""
-        pass
+        raise NotImplementedError(f"{self.__class__.__name__}.get_balances not implemented")
 
     @abstractmethod
     async def create_order(
@@ -227,22 +243,22 @@ class BaseExchange(ABC):
         client_order_id: str = None
     ) -> Order:
         """Create new order"""
-        pass
+        raise NotImplementedError(f"{self.__class__.__name__}.create_order not implemented")
 
     @abstractmethod
     async def cancel_order(self, symbol: str, order_id: str) -> bool:
         """Cancel order"""
-        pass
+        raise NotImplementedError(f"{self.__class__.__name__}.cancel_order not implemented")
 
     @abstractmethod
     async def get_order(self, symbol: str, order_id: str) -> Order:
         """Get order status"""
-        pass
+        raise NotImplementedError(f"{self.__class__.__name__}.get_order not implemented")
 
     @abstractmethod
     async def get_open_orders(self, symbol: str = None) -> List[Order]:
         """Get open orders"""
-        pass
+        raise NotImplementedError(f"{self.__class__.__name__}.get_open_orders not implemented")
 
     async def _request(
         self,
@@ -282,7 +298,7 @@ class BaseExchange(ABC):
     @abstractmethod
     def _get_headers(self, signed: bool, params: Dict = None) -> Dict:
         """Get request headers (with signature if needed)"""
-        pass
+        raise NotImplementedError(f"{self.__class__.__name__}._get_headers not implemented")
 
 
 class ExchangeError(Exception):
