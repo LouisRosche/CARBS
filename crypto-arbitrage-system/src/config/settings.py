@@ -33,24 +33,54 @@ class TradingConfig:
     order_timeout_seconds: int = 30
     max_slippage_bps: int = 50
 
+    # Safety bounds (cannot be exceeded even via config)
+    MAX_ALLOWED_POSITION_USD: float = 100000.0  # $100k hard cap
+    MAX_ALLOWED_DAILY_LOSS_USD: float = 50000.0  # $50k hard cap
+    MIN_ALLOWED_SPREAD_PERCENT: float = 0.05  # 5 bps minimum
+
     def __post_init__(self):
-        """Validate trading config values"""
+        """Validate trading config values with safety bounds"""
         if self.mode not in ("paper", "live"):
             raise ConfigValidationError(f"Invalid trading mode: {self.mode}. Must be 'paper' or 'live'")
-        if self.min_spread_percent < 0:
-            raise ConfigValidationError("min_spread_percent must be non-negative")
+
+        # Spread validation
+        if self.min_spread_percent < self.MIN_ALLOWED_SPREAD_PERCENT:
+            raise ConfigValidationError(
+                f"min_spread_percent ({self.min_spread_percent}) below safety minimum "
+                f"({self.MIN_ALLOWED_SPREAD_PERCENT})"
+            )
         if self.max_spread_percent <= self.min_spread_percent:
             raise ConfigValidationError("max_spread_percent must be greater than min_spread_percent")
+
+        # Position size validation with hard cap
         if self.max_position_usd <= 0:
             raise ConfigValidationError("max_position_usd must be positive")
+        if self.max_position_usd > self.MAX_ALLOWED_POSITION_USD:
+            raise ConfigValidationError(
+                f"max_position_usd ({self.max_position_usd}) exceeds safety limit "
+                f"(${self.MAX_ALLOWED_POSITION_USD:,.0f})"
+            )
+
+        # Daily loss validation with hard cap
         if self.max_daily_loss_usd <= 0:
             raise ConfigValidationError("max_daily_loss_usd must be positive")
+        if self.max_daily_loss_usd > self.MAX_ALLOWED_DAILY_LOSS_USD:
+            raise ConfigValidationError(
+                f"max_daily_loss_usd ({self.max_daily_loss_usd}) exceeds safety limit "
+                f"(${self.MAX_ALLOWED_DAILY_LOSS_USD:,.0f})"
+            )
+
+        # Other validations
         if self.max_daily_trades <= 0:
             raise ConfigValidationError("max_daily_trades must be positive")
         if self.order_timeout_seconds <= 0:
             raise ConfigValidationError("order_timeout_seconds must be positive")
         if self.max_slippage_bps < 0:
             raise ConfigValidationError("max_slippage_bps must be non-negative")
+        if self.max_slippage_bps > 500:  # 5% max slippage
+            raise ConfigValidationError(
+                f"max_slippage_bps ({self.max_slippage_bps}) exceeds safety limit (500 = 5%)"
+            )
 
 
 # Default configurations for optional sections
