@@ -1,0 +1,211 @@
+# CARBS - Crypto Arbitrage Bot System
+# Alertmanager Configuration
+#
+# Routes alerts to appropriate channels based on severity and team.
+
+global:
+  # Default SMTP settings (configure as needed)
+  smtp_smarthost: 'smtp.example.com:587'
+  smtp_from: 'alertmanager@carbs.example.com'
+  smtp_auth_username: 'alertmanager'
+  smtp_auth_password: '{{ SMTP_PASSWORD }}'
+
+  # Slack webhook URL (configure as needed)
+  slack_api_url: '{{ SLACK_WEBHOOK_URL }}'
+
+  # PagerDuty routing key
+  pagerduty_url: 'https://events.pagerduty.com/v2/enqueue'
+
+  # Default resolve timeout
+  resolve_timeout: 5m
+
+# Templates for notifications
+templates:
+  - '/etc/alertmanager/templates/*.tmpl'
+
+# Inhibition rules to prevent alert storms
+inhibit_rules:
+  # If service is down, inhibit dependent alerts
+  - source_match:
+      alertname: 'CARBSServiceDown'
+    target_match_re:
+      alertname: '.*'
+    equal: ['instance']
+
+  # If database is down, inhibit trading alerts
+  - source_match:
+      alertname: 'DatabaseConnectionFailed'
+    target_match_re:
+      alertname: '(NoOpportunitiesDetected|LowExecutionSuccessRate)'
+
+  # If exchange is disconnected, inhibit trading performance alerts
+  - source_match:
+      alertname: 'ExchangeDisconnected'
+    target_match_re:
+      alertname: '(NoOpportunitiesDetected|LowExecutionSuccessRate|HighSlippage)'
+    equal: ['exchange']
+
+  # Critical alerts inhibit warnings
+  - source_match:
+      severity: 'critical'
+    target_match:
+      severity: 'warning'
+    equal: ['alertname']
+
+# Routing tree for alerts
+route:
+  # Default receiver
+  receiver: 'default-receiver'
+
+  # Group alerts by these labels
+  group_by: ['alertname', 'severity', 'team']
+
+  # Wait before sending first notification
+  group_wait: 30s
+
+  # Wait before sending updated notification
+  group_interval: 5m
+
+  # Wait before resending notification
+  repeat_interval: 4h
+
+  # Child routes
+  routes:
+    # ==========================================================================
+    # Critical Alerts - Page immediately
+    # ==========================================================================
+    - match:
+        severity: critical
+      receiver: 'critical-pager'
+      group_wait: 10s
+      repeat_interval: 1h
+      continue: true  # Also send to other matching routes
+
+    # ==========================================================================
+    # Trading Team Alerts
+    # ==========================================================================
+    - match:
+        team: trading
+      receiver: 'trading-slack'
+      routes:
+        - match:
+            severity: critical
+          receiver: 'trading-pager'
+          group_wait: 10s
+
+    # ==========================================================================
+    # Infrastructure Team Alerts
+    # ==========================================================================
+    - match:
+        team: infrastructure
+      receiver: 'infra-slack'
+      routes:
+        - match:
+            severity: critical
+          receiver: 'infra-pager'
+          group_wait: 10s
+
+    # ==========================================================================
+    # Security Team Alerts
+    # ==========================================================================
+    - match:
+        team: security
+      receiver: 'security-slack'
+      routes:
+        - match:
+            severity: critical
+          receiver: 'security-pager'
+          group_wait: 10s
+
+    # ==========================================================================
+    # Info Level Alerts - Log only
+    # ==========================================================================
+    - match:
+        severity: info
+      receiver: 'info-logger'
+      group_wait: 5m
+      repeat_interval: 24h
+
+# Receivers define how to send notifications
+receivers:
+  # Default receiver (for unrouted alerts)
+  - name: 'default-receiver'
+    slack_configs:
+      - channel: '#carbs-alerts'
+        title: '{{ .GroupLabels.alertname }}'
+        text: '{{ range .Alerts }}{{ .Annotations.description }}{{ end }}'
+
+  # Critical pager for immediate response
+  - name: 'critical-pager'
+    pagerduty_configs:
+      - service_key: '{{ PAGERDUTY_CRITICAL_KEY }}'
+        severity: critical
+        description: '{{ .GroupLabels.alertname }}: {{ .CommonAnnotations.summary }}'
+        details:
+          firing: '{{ .Alerts.Firing | len }}'
+          resolved: '{{ .Alerts.Resolved | len }}'
+
+  # Trading team Slack
+  - name: 'trading-slack'
+    slack_configs:
+      - channel: '#carbs-trading'
+        username: 'CARBS Alerts'
+        icon_emoji: ':chart_with_upwards_trend:'
+        color: '{{ if eq .Status "firing" }}danger{{ else }}good{{ end }}'
+        title: '{{ .GroupLabels.alertname }} ({{ .Status | toUpper }})'
+        title_link: 'http://grafana.example.com/d/carbs-trading'
+        text: |-
+          *Summary:* {{ .CommonAnnotations.summary }}
+          *Description:* {{ .CommonAnnotations.description }}
+          *Severity:* {{ .GroupLabels.severity }}
+        actions:
+          - type: button
+            text: 'View Dashboard'
+            url: 'http://grafana.example.com/d/carbs-trading'
+          - type: button
+            text: 'Runbook'
+            url: 'http://wiki.example.com/carbs/runbooks/{{ .GroupLabels.alertname }}'
+
+  # Trading team pager
+  - name: 'trading-pager'
+    pagerduty_configs:
+      - service_key: '{{ PAGERDUTY_TRADING_KEY }}'
+        severity: '{{ .GroupLabels.severity }}'
+
+  # Infrastructure team Slack
+  - name: 'infra-slack'
+    slack_configs:
+      - channel: '#carbs-infra'
+        username: 'CARBS Alerts'
+        icon_emoji: ':server:'
+        color: '{{ if eq .Status "firing" }}warning{{ else }}good{{ end }}'
+        title: '{{ .GroupLabels.alertname }}'
+        text: '{{ .CommonAnnotations.description }}'
+
+  # Infrastructure team pager
+  - name: 'infra-pager'
+    pagerduty_configs:
+      - service_key: '{{ PAGERDUTY_INFRA_KEY }}'
+        severity: '{{ .GroupLabels.severity }}'
+
+  # Security team Slack
+  - name: 'security-slack'
+    slack_configs:
+      - channel: '#carbs-security'
+        username: 'CARBS Security'
+        icon_emoji: ':lock:'
+        color: 'danger'
+        title: ':warning: Security Alert: {{ .GroupLabels.alertname }}'
+        text: '{{ .CommonAnnotations.description }}'
+
+  # Security team pager
+  - name: 'security-pager'
+    pagerduty_configs:
+      - service_key: '{{ PAGERDUTY_SECURITY_KEY }}'
+        severity: critical
+
+  # Info level logger (no notifications, just log)
+  - name: 'info-logger'
+    webhook_configs:
+      - url: 'http://carbs:8080/api/alerts/log'
+        send_resolved: true

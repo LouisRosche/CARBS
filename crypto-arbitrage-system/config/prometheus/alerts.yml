@@ -1,0 +1,493 @@
+# CARBS - Crypto Arbitrage Bot System
+# Prometheus Alert Rules
+#
+# These alerts monitor critical system health, trading operations,
+# and risk management thresholds.
+#
+# Usage:
+#   Add to prometheus.yml:
+#   rule_files:
+#     - /path/to/alerts.yml
+
+groups:
+  # ==========================================================================
+  # System Health Alerts
+  # ==========================================================================
+  - name: system_health
+    interval: 30s
+    rules:
+      # High memory usage
+      - alert: HighMemoryUsage
+        expr: carbs_system_memory_used_percent > 85
+        for: 5m
+        labels:
+          severity: warning
+          team: infrastructure
+        annotations:
+          summary: "High memory usage on CARBS system"
+          description: "Memory usage is {{ $value }}% (threshold: 85%)"
+
+      - alert: CriticalMemoryUsage
+        expr: carbs_system_memory_used_percent > 95
+        for: 2m
+        labels:
+          severity: critical
+          team: infrastructure
+        annotations:
+          summary: "Critical memory usage - system may become unresponsive"
+          description: "Memory usage is {{ $value }}%. Immediate action required."
+
+      # High CPU usage
+      - alert: HighCPUUsage
+        expr: carbs_system_cpu_percent > 80
+        for: 5m
+        labels:
+          severity: warning
+          team: infrastructure
+        annotations:
+          summary: "High CPU usage on CARBS system"
+          description: "CPU usage is {{ $value }}% (threshold: 80%)"
+
+      # Disk space
+      - alert: LowDiskSpace
+        expr: carbs_system_disk_free_gb < 10
+        for: 10m
+        labels:
+          severity: warning
+          team: infrastructure
+        annotations:
+          summary: "Low disk space available"
+          description: "Only {{ $value }}GB free disk space remaining"
+
+      # Service down
+      - alert: CARBSServiceDown
+        expr: up{job="carbs"} == 0
+        for: 1m
+        labels:
+          severity: critical
+          team: trading
+        annotations:
+          summary: "CARBS service is down"
+          description: "CARBS trading service has been unreachable for more than 1 minute"
+
+  # ==========================================================================
+  # Database Alerts
+  # ==========================================================================
+  - name: database
+    interval: 30s
+    rules:
+      - alert: DatabaseConnectionFailed
+        expr: carbs_database_connected == 0
+        for: 1m
+        labels:
+          severity: critical
+          team: infrastructure
+        annotations:
+          summary: "Database connection lost"
+          description: "CARBS cannot connect to the database"
+
+      - alert: HighDatabaseLatency
+        expr: histogram_quantile(0.99, rate(carbs_database_query_duration_seconds_bucket[5m])) > 1
+        for: 5m
+        labels:
+          severity: warning
+          team: infrastructure
+        annotations:
+          summary: "High database query latency"
+          description: "P99 database query latency is {{ $value }}s"
+
+      - alert: DatabasePoolExhausted
+        expr: carbs_database_pool_available == 0
+        for: 2m
+        labels:
+          severity: warning
+          team: infrastructure
+        annotations:
+          summary: "Database connection pool exhausted"
+          description: "No available database connections in pool"
+
+  # ==========================================================================
+  # Redis/Cache Alerts
+  # ==========================================================================
+  - name: cache
+    interval: 30s
+    rules:
+      - alert: RedisConnectionFailed
+        expr: carbs_redis_connected == 0
+        for: 1m
+        labels:
+          severity: critical
+          team: infrastructure
+        annotations:
+          summary: "Redis connection lost"
+          description: "CARBS cannot connect to Redis cache"
+
+      - alert: HighCacheMissRate
+        expr: |
+          rate(carbs_cache_misses_total[5m]) /
+          (rate(carbs_cache_hits_total[5m]) + rate(carbs_cache_misses_total[5m])) > 0.5
+        for: 10m
+        labels:
+          severity: warning
+          team: infrastructure
+        annotations:
+          summary: "High cache miss rate"
+          description: "Cache miss rate is {{ $value | humanizePercentage }}"
+
+  # ==========================================================================
+  # Exchange Connectivity Alerts
+  # ==========================================================================
+  - name: exchange_connectivity
+    interval: 15s
+    rules:
+      - alert: ExchangeDisconnected
+        expr: carbs_exchange_connected == 0
+        for: 2m
+        labels:
+          severity: critical
+          team: trading
+        annotations:
+          summary: "Exchange {{ $labels.exchange }} disconnected"
+          description: "Lost connection to {{ $labels.exchange }} for more than 2 minutes"
+
+      - alert: ExchangeHighLatency
+        expr: histogram_quantile(0.95, rate(carbs_exchange_latency_seconds_bucket[5m])) > 2
+        for: 5m
+        labels:
+          severity: warning
+          team: trading
+        annotations:
+          summary: "High latency on {{ $labels.exchange }}"
+          description: "P95 API latency is {{ $value }}s on {{ $labels.exchange }}"
+
+      - alert: ExchangeHighErrorRate
+        expr: |
+          rate(carbs_exchange_errors_total[5m]) /
+          rate(carbs_exchange_requests_total[5m]) > 0.1
+        for: 5m
+        labels:
+          severity: warning
+          team: trading
+        annotations:
+          summary: "High error rate on {{ $labels.exchange }}"
+          description: "Error rate is {{ $value | humanizePercentage }} on {{ $labels.exchange }}"
+
+      - alert: ExchangeRateLimitHit
+        expr: increase(carbs_exchange_rate_limits_total[5m]) > 10
+        for: 1m
+        labels:
+          severity: warning
+          team: trading
+        annotations:
+          summary: "Hitting rate limits on {{ $labels.exchange }}"
+          description: "{{ $value }} rate limit hits in last 5 minutes"
+
+      - alert: WebSocketDisconnected
+        expr: carbs_websocket_connected == 0
+        for: 1m
+        labels:
+          severity: critical
+          team: trading
+        annotations:
+          summary: "WebSocket disconnected for {{ $labels.exchange }}"
+          description: "Real-time data feed lost for {{ $labels.exchange }}"
+
+  # ==========================================================================
+  # Trading Performance Alerts
+  # ==========================================================================
+  - name: trading_performance
+    interval: 30s
+    rules:
+      - alert: NoOpportunitiesDetected
+        expr: increase(carbs_opportunities_found_total[30m]) == 0
+        for: 30m
+        labels:
+          severity: warning
+          team: trading
+        annotations:
+          summary: "No arbitrage opportunities detected"
+          description: "No opportunities found in the last 30 minutes. Check market conditions or system health."
+
+      - alert: LowExecutionSuccessRate
+        expr: |
+          rate(carbs_trades_total{status="success"}[1h]) /
+          rate(carbs_trades_total[1h]) < 0.8
+        for: 30m
+        labels:
+          severity: warning
+          team: trading
+        annotations:
+          summary: "Low trade execution success rate"
+          description: "Only {{ $value | humanizePercentage }} of trades are succeeding"
+
+      - alert: HighSlippage
+        expr: histogram_quantile(0.95, rate(carbs_slippage_bps_bucket[1h])) > 50
+        for: 30m
+        labels:
+          severity: warning
+          team: trading
+        annotations:
+          summary: "High execution slippage"
+          description: "P95 slippage is {{ $value }} basis points"
+
+      - alert: SlowExecutionTime
+        expr: histogram_quantile(0.95, rate(carbs_execution_time_seconds_bucket[1h])) > 5
+        for: 15m
+        labels:
+          severity: warning
+          team: trading
+        annotations:
+          summary: "Slow trade execution"
+          description: "P95 execution time is {{ $value }}s"
+
+  # ==========================================================================
+  # Risk Management Alerts
+  # ==========================================================================
+  - name: risk_management
+    interval: 15s
+    rules:
+      - alert: DailyLossLimitApproaching
+        expr: carbs_daily_loss_usd / carbs_daily_loss_limit_usd > 0.8
+        for: 1m
+        labels:
+          severity: warning
+          team: trading
+        annotations:
+          summary: "Approaching daily loss limit"
+          description: "Current daily loss is {{ $value | humanizePercentage }} of limit"
+
+      - alert: DailyLossLimitReached
+        expr: carbs_daily_loss_usd >= carbs_daily_loss_limit_usd
+        for: 0m
+        labels:
+          severity: critical
+          team: trading
+        annotations:
+          summary: "Daily loss limit reached - trading halted"
+          description: "Daily loss limit of ${{ $labels.limit }} has been reached"
+
+      - alert: MaxDrawdownExceeded
+        expr: carbs_current_drawdown_percent > carbs_max_drawdown_limit_percent
+        for: 0m
+        labels:
+          severity: critical
+          team: trading
+        annotations:
+          summary: "Maximum drawdown limit exceeded"
+          description: "Current drawdown is {{ $value }}%, exceeding {{ $labels.limit }}% limit"
+
+      - alert: HighPositionConcentration
+        expr: carbs_position_concentration_percent > 50
+        for: 5m
+        labels:
+          severity: warning
+          team: trading
+        annotations:
+          summary: "High position concentration"
+          description: "{{ $value }}% of capital concentrated in single position"
+
+      - alert: LowSharpeRatio
+        expr: carbs_sharpe_ratio < 0.5
+        for: 1h
+        labels:
+          severity: warning
+          team: trading
+        annotations:
+          summary: "Low risk-adjusted returns"
+          description: "Sharpe ratio is {{ $value }}, below acceptable threshold"
+
+      - alert: NegativeProfitFactor
+        expr: carbs_profit_factor < 1
+        for: 2h
+        labels:
+          severity: warning
+          team: trading
+        annotations:
+          summary: "Negative profit factor"
+          description: "Profit factor is {{ $value }}, indicating losing strategy"
+
+  # ==========================================================================
+  # Circuit Breaker Alerts
+  # ==========================================================================
+  - name: circuit_breakers
+    interval: 15s
+    rules:
+      - alert: CircuitBreakerOpen
+        expr: carbs_circuit_breaker_state == 2
+        for: 0m
+        labels:
+          severity: critical
+          team: trading
+        annotations:
+          summary: "Circuit breaker OPEN for {{ $labels.name }}"
+          description: "Trading suspended due to circuit breaker activation"
+
+      - alert: CircuitBreakerHalfOpen
+        expr: carbs_circuit_breaker_state == 1
+        for: 5m
+        labels:
+          severity: warning
+          team: trading
+        annotations:
+          summary: "Circuit breaker in recovery mode"
+          description: "{{ $labels.name }} circuit breaker is half-open, testing recovery"
+
+      - alert: FrequentCircuitBreakerTrips
+        expr: increase(carbs_circuit_breaker_failures_total[1h]) > 5
+        for: 0m
+        labels:
+          severity: warning
+          team: trading
+        annotations:
+          summary: "Frequent circuit breaker trips"
+          description: "{{ $value }} circuit breaker failures in the last hour"
+
+  # ==========================================================================
+  # Balance & Position Alerts
+  # ==========================================================================
+  - name: balances
+    interval: 60s
+    rules:
+      - alert: LowExchangeBalance
+        expr: carbs_balance_total{currency="USDT"} < 100
+        for: 5m
+        labels:
+          severity: warning
+          team: trading
+        annotations:
+          summary: "Low USDT balance on {{ $labels.exchange }}"
+          description: "Only ${{ $value }} USDT remaining on {{ $labels.exchange }}"
+
+      - alert: BalanceDiscrepancy
+        expr: |
+          abs(carbs_balance_expected - carbs_balance_actual) /
+          carbs_balance_expected > 0.01
+        for: 5m
+        labels:
+          severity: warning
+          team: trading
+        annotations:
+          summary: "Balance discrepancy detected"
+          description: "Expected vs actual balance differs by more than 1%"
+
+      - alert: UnexpectedPositionChange
+        expr: |
+          abs(delta(carbs_active_positions[5m])) > 0 and
+          increase(carbs_trades_total[5m]) == 0
+        for: 1m
+        labels:
+          severity: critical
+          team: trading
+        annotations:
+          summary: "Unexpected position change"
+          description: "Position changed without corresponding trade"
+
+  # ==========================================================================
+  # Order Book & Market Data Alerts
+  # ==========================================================================
+  - name: market_data
+    interval: 15s
+    rules:
+      - alert: WideSpread
+        expr: carbs_orderbook_spread_bps > 100
+        for: 5m
+        labels:
+          severity: info
+          team: trading
+        annotations:
+          summary: "Wide spread on {{ $labels.exchange }} {{ $labels.symbol }}"
+          description: "Spread is {{ $value }} bps, market may be illiquid"
+
+      - alert: StaleOrderBook
+        expr: time() - carbs_orderbook_last_update_timestamp > 30
+        for: 1m
+        labels:
+          severity: warning
+          team: trading
+        annotations:
+          summary: "Stale order book data"
+          description: "Order book for {{ $labels.exchange }} {{ $labels.symbol }} not updated for {{ $value }}s"
+
+      - alert: LowLiquidity
+        expr: carbs_orderbook_depth_usd < 10000
+        for: 10m
+        labels:
+          severity: warning
+          team: trading
+        annotations:
+          summary: "Low liquidity detected"
+          description: "Order book depth is only ${{ $value }} on {{ $labels.exchange }} {{ $labels.symbol }}"
+
+  # ==========================================================================
+  # Security Alerts
+  # ==========================================================================
+  - name: security
+    interval: 30s
+    rules:
+      - alert: HighAPIErrorRate
+        expr: |
+          rate(carbs_api_requests_total{status=~"4..|5.."}[5m]) /
+          rate(carbs_api_requests_total[5m]) > 0.1
+        for: 5m
+        labels:
+          severity: warning
+          team: security
+        annotations:
+          summary: "High API error rate"
+          description: "{{ $value | humanizePercentage }} of API requests are failing"
+
+      - alert: UnauthorizedAccessAttempt
+        expr: increase(carbs_api_requests_total{status="401"}[5m]) > 10
+        for: 0m
+        labels:
+          severity: warning
+          team: security
+        annotations:
+          summary: "Multiple unauthorized access attempts"
+          description: "{{ $value }} unauthorized requests in last 5 minutes"
+
+      - alert: RateLimitExceeded
+        expr: increase(carbs_api_requests_total{status="429"}[5m]) > 50
+        for: 0m
+        labels:
+          severity: warning
+          team: security
+        annotations:
+          summary: "Rate limit being hit frequently"
+          description: "{{ $value }} rate-limited requests in last 5 minutes"
+
+  # ==========================================================================
+  # Graceful Shutdown Alerts
+  # ==========================================================================
+  - name: shutdown
+    interval: 10s
+    rules:
+      - alert: ShutdownInProgress
+        expr: carbs_shutdown_phase != 0
+        for: 0m
+        labels:
+          severity: info
+          team: trading
+        annotations:
+          summary: "CARBS graceful shutdown in progress"
+          description: "System is shutting down, phase: {{ $labels.phase }}"
+
+      - alert: ShutdownStuck
+        expr: carbs_shutdown_phase != 0
+        for: 5m
+        labels:
+          severity: critical
+          team: trading
+        annotations:
+          summary: "Shutdown appears stuck"
+          description: "Graceful shutdown has been in progress for more than 5 minutes"
+
+      - alert: OrphanedOperations
+        expr: carbs_in_flight_operations > 0 and carbs_shutdown_phase == 6
+        for: 0m
+        labels:
+          severity: critical
+          team: trading
+        annotations:
+          summary: "Orphaned operations after shutdown"
+          description: "{{ $value }} operations still in-flight after shutdown completed"

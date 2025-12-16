@@ -1,0 +1,102 @@
+# CARBS - Crypto Arbitrage Bot System
+# Prometheus Configuration
+#
+# This configuration file sets up Prometheus to scrape metrics from CARBS
+# and evaluate alert rules.
+
+global:
+  scrape_interval: 15s      # Default scrape interval
+  evaluation_interval: 15s  # Evaluate rules every 15 seconds
+  scrape_timeout: 10s       # Timeout for scrape requests
+
+  # Attach these labels to any time series or alerts
+  external_labels:
+    environment: 'production'
+    service: 'carbs'
+
+# Alertmanager configuration
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets:
+          - alertmanager:9093
+      # Optional: Path prefix for the Alertmanager API
+      # path_prefix: /alertmanager
+
+# Rule files to load
+rule_files:
+  - /etc/prometheus/alerts.yml
+  - /etc/prometheus/alerts/*.yml
+
+# Scrape configurations
+scrape_configs:
+  # ==========================================================================
+  # CARBS Main Application
+  # ==========================================================================
+  - job_name: 'carbs'
+    static_configs:
+      - targets: ['carbs:9090']
+        labels:
+          instance: 'carbs-main'
+    metrics_path: /metrics
+    scheme: http
+    # Honor labels from the scraped target
+    honor_labels: true
+
+  # ==========================================================================
+  # CARBS Health Endpoint
+  # ==========================================================================
+  - job_name: 'carbs-health'
+    static_configs:
+      - targets: ['carbs:8080']
+        labels:
+          instance: 'carbs-health'
+    metrics_path: /health
+    scheme: http
+    scrape_interval: 30s
+
+  # ==========================================================================
+  # Database (PostgreSQL)
+  # ==========================================================================
+  - job_name: 'postgres'
+    static_configs:
+      - targets: ['postgres-exporter:9187']
+        labels:
+          instance: 'carbs-db'
+
+  # ==========================================================================
+  # Redis
+  # ==========================================================================
+  - job_name: 'redis'
+    static_configs:
+      - targets: ['redis-exporter:9121']
+        labels:
+          instance: 'carbs-redis'
+
+  # ==========================================================================
+  # Node Exporter (System Metrics)
+  # ==========================================================================
+  - job_name: 'node'
+    static_configs:
+      - targets: ['node-exporter:9100']
+        labels:
+          instance: 'carbs-host'
+
+  # ==========================================================================
+  # Prometheus Self-Monitoring
+  # ==========================================================================
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']
+
+# Remote write configuration (optional - for long-term storage)
+# remote_write:
+#   - url: "http://cortex:9009/api/prom/push"
+#     queue_config:
+#       max_samples_per_send: 1000
+#       batch_send_deadline: 5s
+#       capacity: 10000
+
+# Remote read configuration (optional)
+# remote_read:
+#   - url: "http://cortex:9009/api/prom/read"
