@@ -30,6 +30,12 @@ logger = logging.getLogger(__name__)
 # Import centralized defaults
 from ..config.defaults import TRADING, CIRCUIT_BREAKER, RETRY
 
+# Import exchange types for real execution
+from ..exchanges import OrderSide, OrderType, OrderStatus as ExchangeOrderStatus
+
+# Import balance manager for validation
+from .balance_manager import BalanceManager, parse_symbol, InsufficientBalanceError
+
 # Validation constants (using centralized defaults)
 SYMBOL_PATTERN = re.compile(r'^[A-Z0-9]{2,10}/[A-Z0-9]{2,10}$')
 MIN_TRADE_AMOUNT = TRADING.MIN_TRADE_AMOUNT
@@ -282,14 +288,21 @@ class ExecutionEngine:
     - Execution analytics
     """
 
-    def __init__(self, config, exchanges: Dict):
+    def __init__(
+        self,
+        config,
+        exchanges: Dict,
+        balance_manager: Optional[BalanceManager] = None
+    ):
         """
         Args:
             config: System configuration
             exchanges: Dict of initialized exchange objects
+            balance_manager: Optional BalanceManager for balance validation
         """
         self.config = config
         self.exchanges = exchanges
+        self.balance_manager = balance_manager
 
         # Circuit breakers per exchange
         self.circuit_breakers: Dict[str, CircuitBreaker] = {}
@@ -487,6 +500,43 @@ class ExecutionEngine:
             logger.error(f"❌ Arbitrage validation failed: {e}")
             return result
 
+        # Parse symbol to get base and quote assets
+        base_asset, quote_asset = parse_symbol(symbol)
+
+        # Validate balances if balance manager is available
+        if self.balance_manager:
+            valid, reason = await self.balance_manager.validate_arbitrage(
+                buy_exchange=buy_exchange,
+                sell_exchange=sell_exchange,
+                base_asset=base_asset,
+                quote_asset=quote_asset,
+                amount=amount,
+                buy_price=buy_price,
+                sell_price=sell_price
+            )
+            if not valid:
+                result.error_message = f"Balance validation failed: {reason}"
+                logger.error(f"❌ {result.error_message}")
+                return result
+
+            # Lock balances to prevent double-spending
+            quote_lock = await self.balance_manager.lock_balance(
+                exchange=buy_exchange,
+                asset=quote_asset,
+                amount=amount * buy_price,
+                trade_id=f"arb_{int(time.time() * 1000)}"
+            )
+            base_lock = await self.balance_manager.lock_balance(
+                exchange=sell_exchange,
+                asset=base_asset,
+                amount=amount,
+                trade_id=f"arb_{int(time.time() * 1000)}"
+            )
+        else:
+            quote_lock = None
+            base_lock = None
+            logger.warning("No balance manager - executing without balance validation!")
+
         logger.info(
             f"🎯 Executing arbitrage: Buy {amount} {symbol} on {buy_exchange} "
             f"@ {buy_price}, Sell on {sell_exchange} @ {sell_price}"
@@ -582,6 +632,14 @@ class ExecutionEngine:
             result.error_message = str(e)
             logger.error(f"❌ Arbitrage execution failed: {e}")
 
+        finally:
+            # Release balance locks
+            if self.balance_manager:
+                if quote_lock:
+                    await self.balance_manager.release_lock(quote_lock)
+                if base_lock:
+                    await self.balance_manager.release_lock(base_lock)
+
         # Store in history
         self.execution_history.append(result)
 
@@ -638,22 +696,53 @@ class ExecutionEngine:
 
             # Create and submit order
             order.status = OrderStatus.SUBMITTED
-            order.order_id = f"{exchange_name}_{symbol}_{side}_{int(time.time() * 1000)}"
 
-            # Paper trading mode
+            # Paper trading mode - use simulation
             if self.config.trading.mode == 'paper':
+                order.order_id = f"{exchange_name}_{symbol}_{side}_{int(time.time() * 1000)}"
                 return await self._simulate_order(order)
 
-            # Real execution would go here
-            # response = await exchange.create_limit_order(
-            #     symbol=symbol,
-            #     side=side,
-            #     amount=float(amount),
-            #     price=float(price)
-            # )
+            # LIVE TRADING MODE - Real exchange execution
+            logger.info(f"🔴 LIVE ORDER: {side.upper()} {amount} {symbol} @ {price} on {exchange_name}")
 
-            # For now, simulate
-            return await self._simulate_order(order)
+            # Convert symbol format for exchange (BTC/USDT -> BTCUSDT for some exchanges)
+            exchange_symbol = symbol.replace("/", "")
+
+            # Determine order side
+            order_side = OrderSide.BUY if side.lower() == 'buy' else OrderSide.SELL
+
+            try:
+                # Submit order to exchange
+                exchange_order = await exchange.create_order(
+                    symbol=exchange_symbol,
+                    side=order_side,
+                    order_type=OrderType.LIMIT,
+                    quantity=amount,
+                    price=price
+                )
+
+                # Map exchange order to our order state
+                order.order_id = exchange_order.order_id
+                order.status = self._map_exchange_status(exchange_order.status)
+                order.filled_amount = exchange_order.filled_quantity
+                order.avg_fill_price = exchange_order.avg_fill_price or price
+                order.fee = exchange_order.fee
+                order.fee_currency = exchange_order.fee_asset
+                order.updated_at = datetime.now(timezone.utc)
+
+                logger.info(
+                    f"✅ Order submitted: {order.order_id} status={order.status.value}"
+                )
+
+                # Wait for fill (with timeout)
+                if order.status not in [OrderStatus.FILLED, OrderStatus.FAILED, OrderStatus.CANCELLED]:
+                    order = await self._wait_for_fill(exchange, exchange_symbol, order)
+
+                return order
+
+            except Exception as e:
+                logger.error(f"Exchange API error: {e}")
+                raise
 
         except Exception as e:
             logger.error(f"Order execution failed: {e}")
@@ -671,6 +760,92 @@ class ExecutionEngine:
                 )
 
             return order
+
+    def _map_exchange_status(self, exchange_status: ExchangeOrderStatus) -> OrderStatus:
+        """Map exchange order status to our internal status"""
+        status_map = {
+            ExchangeOrderStatus.PENDING: OrderStatus.PENDING,
+            ExchangeOrderStatus.OPEN: OrderStatus.SUBMITTED,
+            ExchangeOrderStatus.PARTIALLY_FILLED: OrderStatus.PARTIALLY_FILLED,
+            ExchangeOrderStatus.FILLED: OrderStatus.FILLED,
+            ExchangeOrderStatus.CANCELLED: OrderStatus.CANCELLED,
+            ExchangeOrderStatus.REJECTED: OrderStatus.FAILED,
+            ExchangeOrderStatus.EXPIRED: OrderStatus.TIMEOUT,
+        }
+        return status_map.get(exchange_status, OrderStatus.PENDING)
+
+    async def _wait_for_fill(
+        self,
+        exchange,
+        symbol: str,
+        order: OrderState,
+        timeout_seconds: int = None
+    ) -> OrderState:
+        """
+        Wait for order to fill with polling.
+
+        Args:
+            exchange: Exchange instance
+            symbol: Trading symbol
+            order: Order to wait for
+            timeout_seconds: Max time to wait (default from config)
+
+        Returns:
+            Updated order state
+        """
+        timeout = timeout_seconds or self.config.trading.order_timeout_seconds
+        start = time.time()
+        poll_interval = 0.5  # Start with 500ms
+
+        logger.debug(f"Waiting for order {order.order_id} to fill (timeout={timeout}s)")
+
+        while time.time() - start < timeout:
+            try:
+                # Query order status from exchange
+                exchange_order = await exchange.get_order(symbol, order.order_id)
+
+                order.status = self._map_exchange_status(exchange_order.status)
+                order.filled_amount = exchange_order.filled_quantity
+                order.avg_fill_price = exchange_order.avg_fill_price or order.price
+                order.fee = exchange_order.fee
+                order.updated_at = datetime.now(timezone.utc)
+
+                # Check if terminal state
+                if order.status in [OrderStatus.FILLED, OrderStatus.FAILED, OrderStatus.CANCELLED]:
+                    logger.info(
+                        f"Order {order.order_id} reached terminal state: {order.status.value} "
+                        f"(filled={order.filled_amount})"
+                    )
+                    return order
+
+                # Partial fill progress
+                if order.filled_amount > 0:
+                    logger.debug(
+                        f"Order {order.order_id} partial fill: {order.filled_amount}/{order.amount}"
+                    )
+
+            except Exception as e:
+                logger.warning(f"Error polling order status: {e}")
+
+            # Exponential backoff for polling (max 2 seconds)
+            await asyncio.sleep(min(poll_interval, 2.0))
+            poll_interval *= 1.5
+
+        # Timeout - order didn't fill
+        order.status = OrderStatus.TIMEOUT
+        order.error_message = f"Order timeout after {timeout}s"
+        logger.warning(f"Order {order.order_id} timed out after {timeout}s")
+
+        # Try to cancel the unfilled order
+        try:
+            cancelled = await exchange.cancel_order(symbol, order.order_id)
+            if cancelled:
+                order.status = OrderStatus.CANCELLED
+                logger.info(f"Cancelled timed-out order {order.order_id}")
+        except Exception as e:
+            logger.error(f"Failed to cancel timed-out order: {e}")
+
+        return order
 
     async def _simulate_order(self, order: OrderState) -> OrderState:
         """Simulate order execution for paper trading"""
