@@ -16,7 +16,8 @@ Based on resilience patterns from:
 """
 
 import asyncio
-from decimal import Decimal
+import re
+from decimal import Decimal, InvalidOperation
 from typing import Dict, Optional, List
 from dataclasses import dataclass, field
 from datetime import datetime, timezone, timedelta
@@ -25,6 +26,21 @@ import logging
 import time
 
 logger = logging.getLogger(__name__)
+
+# Import centralized defaults
+from ..config.defaults import TRADING, CIRCUIT_BREAKER, RETRY
+
+# Validation constants (using centralized defaults)
+SYMBOL_PATTERN = re.compile(r'^[A-Z0-9]{2,10}/[A-Z0-9]{2,10}$')
+MIN_TRADE_AMOUNT = TRADING.MIN_TRADE_AMOUNT
+MAX_TRADE_AMOUNT = TRADING.MAX_TRADE_AMOUNT
+MIN_PRICE = TRADING.MIN_PRICE
+MAX_PRICE = TRADING.MAX_PRICE
+
+
+class ValidationError(Exception):
+    """Raised when input validation fails"""
+    pass
 
 
 class CircuitState(Enum):
@@ -90,21 +106,21 @@ class CircuitBreaker:
     def __init__(
         self,
         name: str,
-        failure_threshold: int = 5,
-        success_threshold: int = 2,
-        timeout_seconds: int = 60
+        failure_threshold: int = None,
+        success_threshold: int = None,
+        timeout_seconds: int = None
     ):
         """
         Args:
             name: Circuit breaker identifier
-            failure_threshold: Failures before opening circuit
-            success_threshold: Successes in half-open before closing
-            timeout_seconds: Time to wait before trying half-open
+            failure_threshold: Failures before opening circuit (default from config)
+            success_threshold: Successes in half-open before closing (default from config)
+            timeout_seconds: Time to wait before trying half-open (default from config)
         """
         self.name = name
-        self.failure_threshold = failure_threshold
-        self.success_threshold = success_threshold
-        self.timeout_seconds = timeout_seconds
+        self.failure_threshold = failure_threshold or CIRCUIT_BREAKER.FAILURE_THRESHOLD
+        self.success_threshold = success_threshold or CIRCUIT_BREAKER.SUCCESS_THRESHOLD
+        self.timeout_seconds = timeout_seconds or CIRCUIT_BREAKER.TIMEOUT_SECONDS
 
         self.state = CircuitState.CLOSED
         self.failure_count = 0
@@ -298,11 +314,137 @@ class ExecutionEngine:
         self.active_orders: Dict[str, OrderState] = {}
         self.execution_history: List[ExecutionResult] = []
 
-        # Retry configuration
-        self.max_retries = 3
-        self.base_backoff_seconds = 2
+        # Retry configuration (from centralized defaults)
+        self.max_retries = RETRY.MAX_RETRIES
+        self.base_backoff_seconds = RETRY.BASE_BACKOFF_SECONDS
 
         logger.info("✨ Execution Engine initialized")
+
+    def _validate_exchange(self, exchange_name: str) -> None:
+        """Validate that an exchange exists and is configured"""
+        if not exchange_name:
+            raise ValidationError("Exchange name cannot be empty")
+        if not isinstance(exchange_name, str):
+            raise ValidationError(f"Exchange name must be a string, got {type(exchange_name)}")
+        if exchange_name not in self.exchanges:
+            available = list(self.exchanges.keys())
+            raise ValidationError(
+                f"Exchange '{exchange_name}' not configured. Available: {available}"
+            )
+
+    def _validate_symbol(self, symbol: str) -> None:
+        """Validate trading pair symbol format"""
+        if not symbol:
+            raise ValidationError("Symbol cannot be empty")
+        if not isinstance(symbol, str):
+            raise ValidationError(f"Symbol must be a string, got {type(symbol)}")
+        # Normalize and validate format (e.g., BTC/USDT)
+        symbol_upper = symbol.upper()
+        if not SYMBOL_PATTERN.match(symbol_upper):
+            raise ValidationError(
+                f"Invalid symbol format: '{symbol}'. Expected format: BASE/QUOTE (e.g., BTC/USDT)"
+            )
+
+    def _validate_amount(self, amount: Decimal, context: str = "Amount") -> None:
+        """Validate trade amount"""
+        if amount is None:
+            raise ValidationError(f"{context} cannot be None")
+
+        # Convert to Decimal if needed
+        if not isinstance(amount, Decimal):
+            try:
+                amount = Decimal(str(amount))
+            except (InvalidOperation, ValueError, TypeError) as e:
+                raise ValidationError(f"{context} must be a valid number: {e}")
+
+        if amount <= 0:
+            raise ValidationError(f"{context} must be positive, got {amount}")
+        if amount < MIN_TRADE_AMOUNT:
+            raise ValidationError(
+                f"{context} {amount} below minimum {MIN_TRADE_AMOUNT}"
+            )
+        if amount > MAX_TRADE_AMOUNT:
+            raise ValidationError(
+                f"{context} {amount} exceeds maximum {MAX_TRADE_AMOUNT}"
+            )
+
+    def _validate_price(self, price: Decimal, context: str = "Price") -> None:
+        """Validate price value"""
+        if price is None:
+            raise ValidationError(f"{context} cannot be None")
+
+        # Convert to Decimal if needed
+        if not isinstance(price, Decimal):
+            try:
+                price = Decimal(str(price))
+            except (InvalidOperation, ValueError, TypeError) as e:
+                raise ValidationError(f"{context} must be a valid number: {e}")
+
+        if price <= 0:
+            raise ValidationError(f"{context} must be positive, got {price}")
+        if price < MIN_PRICE:
+            raise ValidationError(
+                f"{context} {price} below minimum {MIN_PRICE}"
+            )
+        if price > MAX_PRICE:
+            raise ValidationError(
+                f"{context} {price} exceeds maximum {MAX_PRICE}"
+            )
+
+    def _validate_side(self, side: str) -> None:
+        """Validate order side"""
+        if not side:
+            raise ValidationError("Order side cannot be empty")
+        if side.lower() not in ('buy', 'sell'):
+            raise ValidationError(
+                f"Invalid order side: '{side}'. Must be 'buy' or 'sell'"
+            )
+
+    def _validate_arbitrage_inputs(
+        self,
+        buy_exchange: str,
+        sell_exchange: str,
+        symbol: str,
+        buy_price: Decimal,
+        sell_price: Decimal,
+        amount: Decimal
+    ) -> None:
+        """
+        Comprehensive validation for arbitrage execution inputs.
+
+        Raises:
+            ValidationError: If any input is invalid
+        """
+        # Validate exchanges
+        self._validate_exchange(buy_exchange)
+        self._validate_exchange(sell_exchange)
+
+        if buy_exchange == sell_exchange:
+            raise ValidationError(
+                f"Buy and sell exchange cannot be the same: '{buy_exchange}'"
+            )
+
+        # Validate symbol
+        self._validate_symbol(symbol)
+
+        # Validate prices
+        self._validate_price(buy_price, "Buy price")
+        self._validate_price(sell_price, "Sell price")
+
+        # Validate arbitrage makes sense (sell > buy for profit)
+        if sell_price <= buy_price:
+            raise ValidationError(
+                f"Unprofitable arbitrage: sell price ({sell_price}) must exceed "
+                f"buy price ({buy_price})"
+            )
+
+        # Validate amount
+        self._validate_amount(amount)
+
+        logger.debug(
+            f"Validation passed for arbitrage: {buy_exchange}->{sell_exchange} "
+            f"{symbol} amount={amount} buy@{buy_price} sell@{sell_price}"
+        )
 
     async def execute_arbitrage(
         self,
@@ -329,6 +471,21 @@ class ExecutionEngine:
         """
         start_time = datetime.now(timezone.utc)
         result = ExecutionResult(success=False)
+
+        # Validate all inputs before proceeding
+        try:
+            self._validate_arbitrage_inputs(
+                buy_exchange=buy_exchange,
+                sell_exchange=sell_exchange,
+                symbol=symbol,
+                buy_price=buy_price,
+                sell_price=sell_price,
+                amount=amount
+            )
+        except ValidationError as e:
+            result.error_message = f"Validation failed: {e}"
+            logger.error(f"❌ Arbitrage validation failed: {e}")
+            return result
 
         logger.info(
             f"🎯 Executing arbitrage: Buy {amount} {symbol} on {buy_exchange} "
@@ -445,6 +602,7 @@ class ExecutionEngine:
         Returns:
             OrderState with execution details
         """
+        # Create initial order state
         order = OrderState(
             exchange=exchange_name,
             symbol=symbol,
@@ -453,6 +611,19 @@ class ExecutionEngine:
             price=price,
             retry_count=retry_count
         )
+
+        # Validate inputs (defensive - should already be validated by caller)
+        try:
+            self._validate_exchange(exchange_name)
+            self._validate_symbol(symbol)
+            self._validate_side(side)
+            self._validate_amount(amount)
+            self._validate_price(price)
+        except ValidationError as e:
+            order.status = OrderStatus.FAILED
+            order.error_message = f"Validation failed: {e}"
+            logger.error(f"Order validation failed: {e}")
+            return order
 
         # Wait for rate limiter
         if not await self.rate_limiters[exchange_name].wait_for_token(timeout=30):

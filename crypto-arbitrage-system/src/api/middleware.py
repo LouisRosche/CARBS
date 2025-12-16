@@ -11,6 +11,7 @@ Implements:
 - Request signing verification
 """
 
+import asyncio
 import os
 import time
 import hmac
@@ -18,10 +19,14 @@ import hashlib
 import logging
 import functools
 import ipaddress
+import threading
 from typing import Dict, Optional, Callable, Set, List
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from collections import defaultdict
+
+# Import centralized defaults
+from ..config.defaults import SECURITY, RATE_LIMIT
 
 logger = logging.getLogger(__name__)
 
@@ -160,9 +165,10 @@ class RequestSigner:
 
         # Nonce cache to prevent replay attacks (store with timestamp for cleanup)
         self._used_nonces: Dict[str, float] = {}
+        self._nonce_lock = threading.Lock()  # Thread-safe nonce operations
 
     def _cleanup_nonces(self):
-        """Remove expired nonces"""
+        """Remove expired nonces (must be called with lock held)"""
         cutoff = time.time() - (self.MAX_REQUEST_AGE_SECONDS * 2)
         self._used_nonces = {
             nonce: ts for nonce, ts in self._used_nonces.items()
@@ -233,12 +239,7 @@ class RequestSigner:
         except ValueError:
             return False, "Invalid timestamp"
 
-        # Check nonce hasn't been used (replay protection)
-        self._cleanup_nonces()
-        if nonce in self._used_nonces:
-            return False, "Nonce already used (replay attack?)"
-
-        # Verify signature
+        # Verify signature first (before taking lock)
         payload = f"{method}\n{path}\n{timestamp}\n{nonce}\n".encode() + body
         expected = hmac.new(
             self._secret_key.encode(),
@@ -249,8 +250,13 @@ class RequestSigner:
         if not hmac.compare_digest(signature, expected):
             return False, "Invalid signature"
 
-        # Record nonce as used
-        self._used_nonces[nonce] = time.time()
+        # Check nonce hasn't been used (replay protection) - thread-safe
+        with self._nonce_lock:
+            self._cleanup_nonces()
+            if nonce in self._used_nonces:
+                return False, "Nonce already used (replay attack?)"
+            # Record nonce as used atomically with check
+            self._used_nonces[nonce] = time.time()
 
         return True, None
 
@@ -284,6 +290,7 @@ class RateLimiter:
 
     Prevents abuse while allowing legitimate bursts.
     Supports both IP-based and user-based rate limiting.
+    Thread-safe implementation using locking.
     """
 
     def __init__(self, config: RateLimitConfig = None):
@@ -291,6 +298,7 @@ class RateLimiter:
         self._minute_buckets: Dict[str, list] = defaultdict(list)
         self._hour_buckets: Dict[str, list] = defaultdict(list)
         self._second_buckets: Dict[str, list] = defaultdict(list)
+        self._lock = threading.Lock()  # Thread-safe bucket operations
 
     def _cleanup_bucket(self, bucket: list, window_seconds: int) -> list:
         """Remove old entries from bucket"""
@@ -299,7 +307,7 @@ class RateLimiter:
 
     def check_limit(self, key: str) -> tuple:
         """
-        Check if request is within rate limits
+        Check if request is within rate limits (thread-safe)
 
         Args:
             key: Rate limit key (usually IP or user_id)
@@ -309,53 +317,54 @@ class RateLimiter:
         """
         now = time.time()
 
-        # Clean and check second bucket (burst)
-        self._second_buckets[key] = self._cleanup_bucket(
-            self._second_buckets[key], 1
-        )
-        if len(self._second_buckets[key]) >= self.config.burst_limit:
-            return False, 1
+        with self._lock:
+            # Clean and check second bucket (burst)
+            self._second_buckets[key] = self._cleanup_bucket(
+                self._second_buckets[key], 1
+            )
+            if len(self._second_buckets[key]) >= self.config.burst_limit:
+                return False, 1
 
-        # Clean and check minute bucket
-        self._minute_buckets[key] = self._cleanup_bucket(
-            self._minute_buckets[key], 60
-        )
-        if len(self._minute_buckets[key]) >= self.config.requests_per_minute:
-            oldest = min(self._minute_buckets[key])
-            retry_after = int(60 - (now - oldest))
-            return False, retry_after
+            # Clean and check minute bucket
+            self._minute_buckets[key] = self._cleanup_bucket(
+                self._minute_buckets[key], 60
+            )
+            if len(self._minute_buckets[key]) >= self.config.requests_per_minute:
+                oldest = min(self._minute_buckets[key])
+                retry_after = max(1, int(60 - (now - oldest)))
+                return False, retry_after
 
-        # Clean and check hour bucket
-        self._hour_buckets[key] = self._cleanup_bucket(
-            self._hour_buckets[key], 3600
-        )
-        if len(self._hour_buckets[key]) >= self.config.requests_per_hour:
-            oldest = min(self._hour_buckets[key])
-            retry_after = int(3600 - (now - oldest))
-            return False, retry_after
+            # Clean and check hour bucket
+            self._hour_buckets[key] = self._cleanup_bucket(
+                self._hour_buckets[key], 3600
+            )
+            if len(self._hour_buckets[key]) >= self.config.requests_per_hour:
+                oldest = min(self._hour_buckets[key])
+                retry_after = max(1, int(3600 - (now - oldest)))
+                return False, retry_after
 
-        # Record this request
-        self._second_buckets[key].append(now)
-        self._minute_buckets[key].append(now)
-        self._hour_buckets[key].append(now)
+            # Record this request atomically with checks
+            self._second_buckets[key].append(now)
+            self._minute_buckets[key].append(now)
+            self._hour_buckets[key].append(now)
 
-        return True, None
+            return True, None
 
     def cleanup_old_entries(self):
         """Periodically cleanup old entries to prevent memory bloat"""
-        now = time.time()
-        for buckets, window in [
-            (self._second_buckets, 1),
-            (self._minute_buckets, 60),
-            (self._hour_buckets, 3600)
-        ]:
-            keys_to_remove = []
-            for key in buckets:
-                buckets[key] = self._cleanup_bucket(buckets[key], window)
-                if not buckets[key]:
-                    keys_to_remove.append(key)
-            for key in keys_to_remove:
-                del buckets[key]
+        with self._lock:
+            for buckets, window in [
+                (self._second_buckets, 1),
+                (self._minute_buckets, 60),
+                (self._hour_buckets, 3600)
+            ]:
+                keys_to_remove = []
+                for key in list(buckets.keys()):  # Create list to avoid dict size change during iteration
+                    buckets[key] = self._cleanup_bucket(buckets[key], window)
+                    if not buckets[key]:
+                        keys_to_remove.append(key)
+                for key in keys_to_remove:
+                    del buckets[key]
 
 
 class UserRateLimiter:
