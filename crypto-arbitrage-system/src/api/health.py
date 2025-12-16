@@ -80,15 +80,48 @@ class HealthChecker:
     - Dependency health aggregation
     """
 
-    def __init__(self, version: str = "1.0.0"):
+    def __init__(
+        self,
+        version: str = "1.0.0",
+        db_pool=None,
+        redis_client=None,
+        exchanges: Dict = None
+    ):
+        """
+        Initialize health checker with optional dependencies.
+
+        Args:
+            version: Application version string
+            db_pool: Database connection pool for health checks
+            redis_client: Redis client for health checks
+            exchanges: Dict of exchange instances for health checks
+        """
         self.version = version
         self._start_time = datetime.now(timezone.utc)
         self._checks: Dict[str, Callable[[], Coroutine[Any, Any, HealthCheckResult]]] = {}
+
+        # Store dependencies for actual connectivity tests
+        self._db_pool = db_pool
+        self._redis_client = redis_client
+        self._exchanges = exchanges or {}
 
         # Register built-in checks
         self.register_check("memory", self._check_memory)
         self.register_check("disk", self._check_disk)
         self.register_check("cpu", self._check_cpu)
+
+        # Register dependency checks if dependencies provided
+        if db_pool is not None:
+            self.register_check("database", self._check_database)
+
+        if redis_client is not None:
+            self.register_check("redis", self._check_redis)
+
+        for exchange_name in self._exchanges:
+            self.register_check(
+                f"exchange_{exchange_name}",
+                lambda name=exchange_name: self._check_exchange(name)
+            )
 
     @property
     def uptime_seconds(self) -> float:
@@ -258,8 +291,156 @@ class HealthChecker:
             }
         )
 
+    async def _check_database(self) -> HealthCheckResult:
+        """Check database connectivity with actual query"""
+        if self._db_pool is None:
+            return HealthCheckResult(
+                name="database",
+                status=HealthStatus.UNHEALTHY,
+                message="Database pool not configured"
+            )
 
-# Dependency health checks
+        try:
+            async with self._db_pool.acquire() as conn:
+                # Execute actual query to verify connectivity
+                result = await asyncio.wait_for(
+                    conn.fetchval("SELECT 1"),
+                    timeout=5.0
+                )
+
+                if result == 1:
+                    # Get pool stats if available
+                    pool_size = getattr(self._db_pool, 'get_size', lambda: 'N/A')()
+                    return HealthCheckResult(
+                        name="database",
+                        status=HealthStatus.HEALTHY,
+                        message="Database connection OK",
+                        details={"pool_size": pool_size}
+                    )
+                else:
+                    return HealthCheckResult(
+                        name="database",
+                        status=HealthStatus.DEGRADED,
+                        message="Database returned unexpected result"
+                    )
+
+        except asyncio.TimeoutError:
+            return HealthCheckResult(
+                name="database",
+                status=HealthStatus.UNHEALTHY,
+                message="Database query timed out (>5s)"
+            )
+        except Exception as e:
+            return HealthCheckResult(
+                name="database",
+                status=HealthStatus.UNHEALTHY,
+                message=f"Database error: {e}"
+            )
+
+    async def _check_redis(self) -> HealthCheckResult:
+        """Check Redis connectivity with actual ping"""
+        if self._redis_client is None:
+            return HealthCheckResult(
+                name="redis",
+                status=HealthStatus.UNHEALTHY,
+                message="Redis client not configured"
+            )
+
+        try:
+            # Execute actual ping to verify connectivity
+            pong = await asyncio.wait_for(
+                self._redis_client.ping(),
+                timeout=5.0
+            )
+
+            if pong:
+                # Get Redis info if available
+                try:
+                    info = await self._redis_client.info()
+                    details = {
+                        "version": info.get("redis_version"),
+                        "connected_clients": info.get("connected_clients"),
+                        "used_memory_human": info.get("used_memory_human")
+                    }
+                except Exception:
+                    details = {}
+
+                return HealthCheckResult(
+                    name="redis",
+                    status=HealthStatus.HEALTHY,
+                    message="Redis connection OK",
+                    details=details
+                )
+            else:
+                return HealthCheckResult(
+                    name="redis",
+                    status=HealthStatus.DEGRADED,
+                    message="Redis ping returned falsy value"
+                )
+
+        except asyncio.TimeoutError:
+            return HealthCheckResult(
+                name="redis",
+                status=HealthStatus.UNHEALTHY,
+                message="Redis ping timed out (>5s)"
+            )
+        except Exception as e:
+            return HealthCheckResult(
+                name="redis",
+                status=HealthStatus.UNHEALTHY,
+                message=f"Redis error: {e}"
+            )
+
+    async def _check_exchange(self, exchange_name: str) -> HealthCheckResult:
+        """Check exchange connectivity with actual API call"""
+        exchange = self._exchanges.get(exchange_name)
+        if exchange is None:
+            return HealthCheckResult(
+                name=f"exchange_{exchange_name}",
+                status=HealthStatus.UNHEALTHY,
+                message=f"Exchange {exchange_name} not configured"
+            )
+
+        try:
+            # Try to fetch a ticker - actual API call to verify connectivity
+            ticker = await asyncio.wait_for(
+                exchange.fetch_ticker("BTC/USDT"),
+                timeout=10.0
+            )
+
+            if ticker and ticker.get('last'):
+                return HealthCheckResult(
+                    name=f"exchange_{exchange_name}",
+                    status=HealthStatus.HEALTHY,
+                    message=f"{exchange_name} connection OK",
+                    details={
+                        "last_price": str(ticker.get('last', 'N/A')),
+                        "bid": str(ticker.get('bid', 'N/A')),
+                        "ask": str(ticker.get('ask', 'N/A'))
+                    }
+                )
+            else:
+                return HealthCheckResult(
+                    name=f"exchange_{exchange_name}",
+                    status=HealthStatus.DEGRADED,
+                    message=f"{exchange_name} returned incomplete data"
+                )
+
+        except asyncio.TimeoutError:
+            return HealthCheckResult(
+                name=f"exchange_{exchange_name}",
+                status=HealthStatus.DEGRADED,
+                message=f"{exchange_name} response slow (>10s)"
+            )
+        except Exception as e:
+            return HealthCheckResult(
+                name=f"exchange_{exchange_name}",
+                status=HealthStatus.UNHEALTHY,
+                message=f"{exchange_name} error: {e}"
+            )
+
+
+# Standalone dependency health checks (for external use)
 
 class DatabaseHealthCheck:
     """Health check for PostgreSQL database"""

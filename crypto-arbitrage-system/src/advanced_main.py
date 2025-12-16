@@ -256,6 +256,8 @@ class AdvancedArbitrageBot:
 
     async def _initialize_exchanges(self):
         """Initialize exchange connections"""
+        failed_exchanges = []
+
         for exchange_name, exchange_config in self.config.exchanges.items():
             if not exchange_config.get('enabled', True):
                 continue
@@ -274,6 +276,21 @@ class AdvancedArbitrageBot:
 
             except Exception as e:
                 logger.error(f"✗ Failed to connect to {exchange_name}: {e}")
+                failed_exchanges.append(exchange_name)
+
+        # Fail fast if no exchanges connected - critical for arbitrage
+        if not self.exchanges:
+            raise RuntimeError(
+                f"No exchanges connected. Failed: {failed_exchanges}. "
+                "Cannot operate arbitrage without exchange connections."
+            )
+
+        # Warn if some exchanges failed but continue if we have at least 2
+        if failed_exchanges and len(self.exchanges) < 2:
+            raise RuntimeError(
+                f"Only {len(self.exchanges)} exchange(s) connected, need at least 2 for arbitrage. "
+                f"Failed: {failed_exchanges}"
+            )
 
     async def fetch_orderbook(self, exchange_name: str, symbol: str) -> EnhancedOrderBook:
         """Fetch enhanced orderbook"""
@@ -529,7 +546,10 @@ class AdvancedArbitrageBot:
             symbol=symbol,
             buy_price=opportunity['buy_price'],
             sell_price=opportunity['sell_price'],
-            amount=amount
+            amount=amount,
+            buy_orderbook=opportunity.get('buy_orderbook'),
+            sell_orderbook=opportunity.get('sell_orderbook'),
+            max_slippage_percent=Decimal('0.5')
         )
 
         if result.success:
@@ -578,7 +598,7 @@ class AdvancedArbitrageBot:
                 'score': score.composite_score
             })
 
-            # Record in compliance if available
+            # Record in compliance if available - important for audit trail
             if self.compliance_manager:
                 try:
                     await self.compliance_manager.record_trade(
@@ -590,7 +610,14 @@ class AdvancedArbitrageBot:
                         proceeds=float(position_risk.recommended_size + result.net_profit)
                     )
                 except Exception as e:
-                    logger.warning(f"Compliance recording failed: {e}")
+                    # Compliance failures need attention for regulatory reasons
+                    logger.error(
+                        f"Compliance recording failed for {symbol} trade: {e}. "
+                        "Manual audit entry may be required.",
+                        exc_info=True
+                    )
+                    if self.state_manager:
+                        self.state_manager.record_error(f"Compliance recording failed: {e}")
 
             # Send notification if available
             if self.notification_manager:
@@ -702,7 +729,19 @@ class AdvancedArbitrageBot:
                 )
 
         except Exception as e:
-            logger.error(f"Failed to save execution to database: {e}")
+            # Database persistence failure is serious - log with full context for investigation
+            logger.error(
+                f"CRITICAL: Failed to save execution to database: {e}. "
+                f"Trade details - Symbol: {opportunity['symbol']}, "
+                f"Buy: {opportunity['buy_exchange']}, Sell: {opportunity['sell_exchange']}, "
+                f"Profit: ${result.net_profit:.2f}",
+                exc_info=True
+            )
+            # Record error in state manager for monitoring
+            if self.state_manager:
+                self.state_manager.record_error(
+                    f"Database persistence failed for trade on {opportunity['symbol']}: {e}"
+                )
 
     async def monitor_symbol(self, symbol: str):
         """Continuously monitor one symbol"""

@@ -361,18 +361,90 @@ class GracefulShutdownManager:
         """Close all open positions at market price"""
         logger.info("Closing open positions...")
 
-        # This would need integration with position tracking
-        # For now, log a warning
-        logger.warning(
-            "Position closing not fully implemented - "
-            "manual verification recommended"
-        )
+        if not self.exchanges:
+            logger.warning("No exchanges configured - cannot close positions")
+            return
 
-        # TODO: Implement position closing
-        # 1. Get all open positions from each exchange
-        # 2. Submit market orders to close each position
-        # 3. Wait for fills
-        # 4. Log results
+        closed_positions = []
+        failed_positions = []
+
+        for exchange_name, exchange in self.exchanges.items():
+            try:
+                # Get balances to find non-zero positions
+                balances = await asyncio.wait_for(
+                    exchange.get_balances(),
+                    timeout=10.0
+                )
+
+                for asset, balance in balances.items():
+                    # Skip stablecoins and base currencies
+                    if asset in ('USDT', 'USDC', 'BUSD', 'USD', 'EUR'):
+                        continue
+
+                    free_balance = balance.get('free', 0)
+                    if isinstance(free_balance, str):
+                        from decimal import Decimal
+                        free_balance = Decimal(free_balance)
+
+                    # Skip negligible balances (less than $1 equivalent)
+                    if free_balance <= 0:
+                        continue
+
+                    # Try to close position by selling to USDT
+                    symbol = f"{asset}/USDT"
+                    try:
+                        logger.info(f"Closing position: {free_balance} {asset} on {exchange_name}")
+
+                        # Use market order to ensure fill
+                        order = await asyncio.wait_for(
+                            exchange.create_order(
+                                symbol=symbol,
+                                side='sell',
+                                order_type='market',
+                                quantity=free_balance
+                            ),
+                            timeout=self.config.close_positions_timeout_seconds
+                        )
+
+                        if order and order.status.value in ('filled', 'closed'):
+                            closed_positions.append({
+                                'exchange': exchange_name,
+                                'asset': asset,
+                                'amount': float(free_balance),
+                                'order_id': order.order_id
+                            })
+                            logger.info(f"Closed position: {asset} on {exchange_name}")
+                        else:
+                            failed_positions.append({
+                                'exchange': exchange_name,
+                                'asset': asset,
+                                'reason': 'Order not filled'
+                            })
+
+                    except asyncio.TimeoutError:
+                        failed_positions.append({
+                            'exchange': exchange_name,
+                            'asset': asset,
+                            'reason': 'Timeout'
+                        })
+                        logger.warning(f"Timeout closing {asset} on {exchange_name}")
+                    except Exception as e:
+                        failed_positions.append({
+                            'exchange': exchange_name,
+                            'asset': asset,
+                            'reason': str(e)
+                        })
+                        logger.warning(f"Failed to close {asset} on {exchange_name}: {e}")
+
+            except Exception as e:
+                logger.error(f"Error getting balances from {exchange_name}: {e}")
+
+        # Log summary
+        logger.info(f"Position closing complete: {len(closed_positions)} closed, {len(failed_positions)} failed")
+
+        if failed_positions:
+            logger.warning(f"Failed to close positions: {failed_positions}")
+            logger.warning("Manual intervention may be required!")
 
     async def _flush_data(self):
         """Flush logs, metrics, and pending database writes"""

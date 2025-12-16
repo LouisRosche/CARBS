@@ -291,14 +291,34 @@ class RateLimiter:
     Prevents abuse while allowing legitimate bursts.
     Supports both IP-based and user-based rate limiting.
     Thread-safe implementation using locking.
+    Includes LRU eviction to prevent unbounded memory growth.
     """
+
+    # Maximum unique keys to track (prevents memory exhaustion)
+    MAX_TRACKED_KEYS = 10000
 
     def __init__(self, config: RateLimitConfig = None):
         self.config = config or RateLimitConfig()
         self._minute_buckets: Dict[str, list] = defaultdict(list)
         self._hour_buckets: Dict[str, list] = defaultdict(list)
         self._second_buckets: Dict[str, list] = defaultdict(list)
+        self._last_access: Dict[str, float] = {}  # Track last access for LRU
         self._lock = threading.Lock()  # Thread-safe bucket operations
+
+    def _evict_lru_if_needed(self):
+        """Evict least recently used entries if over max capacity."""
+        total_keys = len(self._last_access)
+        if total_keys > self.MAX_TRACKED_KEYS:
+            # Evict oldest 10% of entries
+            evict_count = total_keys // 10
+            sorted_by_access = sorted(self._last_access.items(), key=lambda x: x[1])
+            keys_to_evict = [k for k, _ in sorted_by_access[:evict_count]]
+
+            for key in keys_to_evict:
+                self._second_buckets.pop(key, None)
+                self._minute_buckets.pop(key, None)
+                self._hour_buckets.pop(key, None)
+                self._last_access.pop(key, None)
 
     def _cleanup_bucket(self, bucket: list, window_seconds: int) -> list:
         """Remove old entries from bucket"""
@@ -347,6 +367,10 @@ class RateLimiter:
             self._second_buckets[key].append(now)
             self._minute_buckets[key].append(now)
             self._hour_buckets[key].append(now)
+
+            # Update LRU tracking and evict if needed
+            self._last_access[key] = now
+            self._evict_lru_if_needed()
 
             return True, None
 
