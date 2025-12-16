@@ -1,4 +1,5 @@
-"""Redis cache wrapper with TLS support"""
+"""Redis cache wrapper with TLS support and proper resource management"""
+import asyncio
 import json
 import os
 import ssl
@@ -80,12 +81,15 @@ class RedisCache:
     - TLS encrypted connections (rediss://)
     - Mutual TLS authentication
     - Connection pooling
+    - Async context manager for guaranteed cleanup
     """
 
     def __init__(self, config):
         self.config = config
         self.client = None
         self._ssl_context = None
+        self._connected = False
+        self._shutdown_lock = None  # Will be initialized in connect()
 
     def _get_ssl_context(self) -> Optional[ssl.SSLContext]:
         """Get or create SSL context if TLS is enabled."""
@@ -115,13 +119,30 @@ class RedisCache:
 
         return self._ssl_context
 
-    async def connect(self):
+    @property
+    def is_connected(self) -> bool:
+        """Check if Redis is connected and healthy"""
+        return self._connected and self.client is not None
+
+    async def connect(self, max_retries: int = 3, retry_delay: float = 2.0):
         """
-        Connect to Redis server.
+        Connect to Redis server with retry logic.
 
         Automatically uses TLS if REDIS_TLS environment variable is set
         or tls: true is in config.
+
+        Args:
+            max_retries: Maximum connection retry attempts
+            retry_delay: Delay between retries in seconds
         """
+        if self._connected and self.client:
+            logger.debug("Redis already connected")
+            return
+
+        # Initialize shutdown lock
+        if self._shutdown_lock is None:
+            self._shutdown_lock = asyncio.Lock()
+
         host = os.getenv('REDIS_HOST', self.config.get('host', 'localhost'))
         port = int(os.getenv('REDIS_PORT', self.config.get('port', 6379)))
         password = os.getenv('REDIS_PASSWORD', self.config.get('password', ''))
@@ -144,18 +165,38 @@ class RedisCache:
         else:
             logger.info(f"Connecting to Redis at {host}:{port}")
 
-        self.client = redis.Redis(**connection_kwargs)
+        last_error = None
+        for attempt in range(max_retries):
+            try:
+                self.client = redis.Redis(**connection_kwargs)
 
-        # Test connection
-        try:
-            await self.client.ping()
-            if ssl_context:
-                logger.info("Redis cache connected with TLS encryption")
-            else:
-                logger.info("Redis cache connected (unencrypted)")
-        except Exception as e:
-            logger.error(f"Failed to connect to Redis: {e}")
-            raise
+                # Test connection
+                await self.client.ping()
+                self._connected = True
+
+                if ssl_context:
+                    logger.info("Redis cache connected with TLS encryption")
+                else:
+                    logger.info("Redis cache connected (unencrypted)")
+                return
+
+            except Exception as e:
+                last_error = e
+                logger.warning(
+                    f"Redis connection attempt {attempt + 1}/{max_retries} failed: {e}"
+                )
+                if self.client:
+                    try:
+                        await self.client.close()
+                    except Exception:
+                        pass
+                    self.client = None
+
+                if attempt < max_retries - 1:
+                    await asyncio.sleep(retry_delay * (attempt + 1))
+
+        logger.error(f"Failed to connect to Redis after {max_retries} attempts: {last_error}")
+        raise ConnectionError(f"Failed to connect to Redis: {last_error}")
 
     async def get(self, key):
         if not self.client:
@@ -196,9 +237,65 @@ class RedisCache:
             return False
 
     async def close(self):
-        if self.client:
-            await self.client.close()
-            logger.info("Redis cache connection closed")
+        """
+        Close Redis connection gracefully.
+
+        Thread-safe and idempotent.
+        """
+        # Handle case where shutdown lock not initialized
+        if self._shutdown_lock is None:
+            self._shutdown_lock = asyncio.Lock()
+
+        async with self._shutdown_lock:
+            if self.client:
+                try:
+                    await asyncio.wait_for(
+                        self.client.close(),
+                        timeout=5.0
+                    )
+                    logger.info("Redis cache connection closed")
+                except asyncio.TimeoutError:
+                    logger.warning("Redis close timed out")
+                except Exception as e:
+                    logger.error(f"Error closing Redis connection: {e}")
+                finally:
+                    self.client = None
+                    self._connected = False
+
+    async def health_check(self) -> bool:
+        """
+        Check Redis connection health.
+
+        Returns:
+            True if healthy, False otherwise
+        """
+        if not self._connected or not self.client:
+            return False
+
+        try:
+            await self.client.ping()
+            return True
+        except Exception as e:
+            logger.warning(f"Redis health check failed: {e}")
+            return False
+
+    async def __aenter__(self):
+        """Async context manager entry"""
+        await self.connect()
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        """Async context manager exit - ensures cleanup"""
+        await self.close()
+        return False  # Don't suppress exceptions
+
+    def __del__(self):
+        """Destructor - warn if not properly closed"""
+        if self._connected and self.client:
+            logger.warning(
+                "RedisCache was not properly closed. "
+                "Use 'async with' or call close() explicitly."
+            )
 
     async def sadd(self, key: str, *values) -> int:
         """Add values to a set"""
