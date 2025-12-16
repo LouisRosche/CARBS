@@ -1,14 +1,45 @@
 """
 Compliance and Accounting Module
 
-Provides:
+Provides comprehensive GAAP and regulatory compliance:
+
+GAAP Financial Reporting:
+- Complete financial statements (Balance Sheet, Income Statement, Cash Flow)
 - GAAP-compliant trade journaling
-- Tax lot tracking (FIFO, LIFO, specific identification)
-- Data export for accountants (CSV, JSON)
+- Revenue recognition per ASC 606
+- Fair value measurement per ASC 820
+- Notes to financial statements
+
+Tax Compliance:
+- Tax lot tracking (FIFO, LIFO, HIFO, specific identification)
+- Form 8949 generation (capital gains/losses)
+- Form 1099-B generation
+- Cost basis reconciliation
+- Multi-jurisdiction support
+
+Regulatory Reporting:
+- FinCEN compliance (CTR, SAR, Travel Rule)
+- IRS reporting (8949, 1099-B)
+- SEC reporting framework (10-K, 10-Q, 8-K ready)
+- Anti-money laundering (AML) monitoring
+- Know Your Customer (KYC) integration
+
+Internal Controls:
+- SOX 404 compliance framework
+- COSO internal controls
+- Account reconciliation procedures
+- Control testing and monitoring
+- Segregation of duties enforcement
+
+Data Privacy:
 - GDPR compliance (data deletion, export)
 - SOC2 audit trail features
-- Retention policy enforcement
-- P&L reporting with cost basis tracking
+- Data retention policy enforcement
+
+Data Export:
+- Accountant-friendly formats (CSV, JSON)
+- Tax software compatibility
+- Audit package generation
 """
 
 import csv
@@ -1209,6 +1240,7 @@ def create_compliance_suite(data_dir: Path = None) -> Dict:
 
 
 __all__ = [
+    # Existing exports - Cost Basis and Tax
     "CostBasisMethod",
     "CostBasisTracker",
     "TradeJournal",
@@ -1219,5 +1251,31 @@ __all__ = [
     "GDPRCompliance",
     "SOC2Controls",
     "TaxJurisdiction",
-    "create_compliance_suite"
+    "create_compliance_suite",
+
+    # GAAP Financial Statements (gaap_financial_statements.py)
+    # Available via: from src.compliance.gaap_financial_statements import ...
+    # - FinancialStatementPackage
+    # - BalanceSheet, IncomeStatement, CashFlowStatement
+    # - BalanceSheetItem, IncomeStatementItem, CashFlowItem
+    # - FinancialNote, AccountingPeriod, FinancialStatementType
+
+    # Regulatory Reporting (regulatory_reporting.py)
+    # Available via: from src.compliance.regulatory_reporting import ...
+    # - RegulatoryReportingEngine
+    # - Form8949Transaction, Form1099B
+    # - SuspiciousActivityReport, CurrencyTransactionReport
+    # - TravelRuleReport, RegulatoryJurisdiction, ReportType
+
+    # Fair Value and Revenue (fair_value_revenue.py)
+    # Available via: from src.compliance.fair_value_revenue import ...
+    # - FairValueEngine, RevenueRecognitionEngine
+    # - FairValueMeasurement, RevenueRecognitionEvent
+    # - FairValueLevel, ValuationTechnique, RevenueCategory
+
+    # Reconciliation and Controls (reconciliation_controls.py)
+    # Available via: from src.compliance.reconciliation_controls import ...
+    # - InternalControlsFramework, ReconciliationEngine
+    # - InternalControl, ControlTest, ReconciliationRecord
+    # - ControlType, ControlFrequency, ControlEffectiveness, ReconciliationType
 ]
