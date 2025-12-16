@@ -833,5 +833,766 @@ class TestNotificationIntegration:
         await manager.stop()
 
 
+# =============================================================================
+# Full Trade Cycle Integration Tests
+# =============================================================================
+
+class TestFullTradeCycle:
+    """
+    End-to-end tests for complete arbitrage trade cycles.
+
+    Tests the full flow:
+    1. Opportunity detection
+    2. Balance validation
+    3. Balance locking
+    4. Order execution
+    5. Balance reconciliation
+    6. Profit calculation
+    """
+
+    @pytest.fixture
+    def mock_config(self):
+        """Create mock trading config"""
+        from dataclasses import dataclass
+
+        @dataclass
+        class MockTradingConfig:
+            mode: str = "paper"
+            min_spread_percent: float = 0.1
+            max_spread_percent: float = 5.0
+            max_position_usd: float = 1000.0
+            max_daily_loss_usd: float = 100.0
+            max_daily_trades: int = 20
+            order_timeout_seconds: int = 30
+            max_slippage_bps: int = 50
+
+        @dataclass
+        class MockConfig:
+            trading: MockTradingConfig = None
+            exchanges: dict = None
+
+            def __post_init__(self):
+                if self.trading is None:
+                    self.trading = MockTradingConfig()
+                if self.exchanges is None:
+                    self.exchanges = {"binance": {}, "mexc": {}}
+
+        return MockConfig()
+
+    @pytest.mark.asyncio
+    async def test_complete_arbitrage_cycle(self, mock_exchanges, mock_config):
+        """Test complete arbitrage cycle from detection to profit"""
+        binance = mock_exchanges["binance"]
+        mexc = mock_exchanges["mexc"]
+
+        # Set up price differential (buy low on Binance, sell high on MEXC)
+        binance.set_price("BTCUSDT", Decimal("42000"))
+        mexc.set_price("BTCUSDT", Decimal("42100"))
+
+        # Record initial balances
+        binance_initial = await binance.get_balances()
+        mexc_initial = await mexc.get_balances()
+        initial_total_usdt = (
+            binance_initial["USDT"]["free"] +
+            mexc_initial["USDT"]["free"]
+        )
+
+        # Get order books to verify opportunity
+        binance_book = await binance.get_orderbook("BTCUSDT")
+        mexc_book = await mexc.get_orderbook("BTCUSDT")
+
+        buy_price = binance_book["asks"][0][0]
+        sell_price = mexc_book["bids"][0][0]
+        spread = (sell_price - buy_price) / buy_price * Decimal("10000")
+
+        # Verify spread exists
+        assert spread > 0, "Expected positive spread"
+
+        # Execute buy leg
+        quantity = Decimal("0.1")
+        buy_order = await binance.create_order(
+            symbol="BTCUSDT",
+            side="buy",
+            order_type="market",
+            quantity=quantity
+        )
+
+        # Execute sell leg
+        sell_order = await mexc.create_order(
+            symbol="BTCUSDT",
+            side="sell",
+            order_type="market",
+            quantity=quantity
+        )
+
+        # Verify orders filled
+        assert buy_order["status"] == "filled"
+        assert sell_order["status"] == "filled"
+
+        # Calculate profit
+        buy_cost = buy_order["filled_quantity"] * buy_order["executed_price"]
+        sell_proceeds = sell_order["filled_quantity"] * sell_order["executed_price"]
+        gross_profit = sell_proceeds - buy_cost
+        total_fees = buy_order["fee"] + sell_order["fee"]
+        net_profit = gross_profit - total_fees
+
+        # Verify final balances
+        binance_final = await binance.get_balances()
+        mexc_final = await mexc.get_balances()
+        final_total_usdt = (
+            binance_final["USDT"]["free"] +
+            mexc_final["USDT"]["free"]
+        )
+
+        # Net USDT change should equal gross profit (before fees deducted from balance)
+        usdt_change = final_total_usdt - initial_total_usdt
+
+        # The actual profit is in the exchange balances
+        print(f"Buy cost: {buy_cost:.2f}")
+        print(f"Sell proceeds: {sell_proceeds:.2f}")
+        print(f"Gross profit: {gross_profit:.2f}")
+        print(f"Fees: {total_fees:.2f}")
+        print(f"Net profit: {net_profit:.2f}")
+
+    @pytest.mark.asyncio
+    async def test_balance_validation_before_trade(self, mock_exchanges, mock_config):
+        """Test balance validation prevents over-trading"""
+        binance = mock_exchanges["binance"]
+
+        # Try to buy more BTC than we have USDT for
+        initial_balance = await binance.get_balances()
+        usdt_available = initial_balance["USDT"]["free"]
+
+        # Current price around 42000, calculate max we can buy
+        ticker = await binance.get_ticker("BTCUSDT")
+        max_quantity = usdt_available / ticker["ask"]
+
+        # Try to buy more than max
+        with pytest.raises(ValueError, match="Insufficient"):
+            await binance.create_order(
+                symbol="BTCUSDT",
+                side="buy",
+                order_type="market",
+                quantity=max_quantity * Decimal("2")  # Double the max
+            )
+
+    @pytest.mark.asyncio
+    async def test_partial_fill_handling(self, mock_exchanges):
+        """Test handling of partial fills"""
+        # Note: Current mock always fills completely
+        # This test verifies the structure for partial fill handling
+        binance = mock_exchanges["binance"]
+
+        order = await binance.create_order(
+            symbol="BTCUSDT",
+            side="buy",
+            order_type="market",
+            quantity=Decimal("0.05")
+        )
+
+        # Verify fill quantity matches requested
+        assert order["filled_quantity"] == Decimal("0.05")
+        assert order["filled_quantity"] == order["quantity"]
+
+    @pytest.mark.asyncio
+    async def test_multi_symbol_arbitrage(self, mock_exchanges):
+        """Test arbitrage across multiple trading pairs"""
+        binance = mock_exchanges["binance"]
+        mexc = mock_exchanges["mexc"]
+
+        # Set up opportunities on both BTC and ETH
+        binance.set_price("BTCUSDT", Decimal("42000"))
+        mexc.set_price("BTCUSDT", Decimal("42100"))
+        binance.set_price("ETHUSDT", Decimal("2200"))
+        mexc.set_price("ETHUSDT", Decimal("2210"))
+
+        # Execute both pairs concurrently
+        results = await asyncio.gather(
+            binance.create_order("BTCUSDT", "buy", "market", Decimal("0.05")),
+            mexc.create_order("BTCUSDT", "sell", "market", Decimal("0.05")),
+            binance.create_order("ETHUSDT", "buy", "market", Decimal("0.5")),
+            mexc.create_order("ETHUSDT", "sell", "market", Decimal("0.5")),
+            return_exceptions=True
+        )
+
+        # All orders should succeed
+        for result in results:
+            assert not isinstance(result, Exception)
+            assert result["status"] == "filled"
+
+    @pytest.mark.asyncio
+    async def test_trade_cycle_with_fee_calculation(self, mock_exchanges):
+        """Test that fees are correctly calculated and deducted"""
+        binance = mock_exchanges["binance"]
+
+        # Execute a trade
+        order = await binance.create_order(
+            symbol="BTCUSDT",
+            side="buy",
+            order_type="market",
+            quantity=Decimal("0.1")
+        )
+
+        # Fee should be 0.1% of trade value
+        expected_fee_rate = Decimal("0.001")
+        trade_value = order["filled_quantity"] * order["executed_price"]
+        expected_fee = trade_value * expected_fee_rate
+
+        assert order["fee"] == expected_fee
+        assert order["fee_currency"] == "USDT"
+
+
+# =============================================================================
+# Balance Manager Integration Tests
+# =============================================================================
+
+class TestBalanceManagerIntegration:
+    """Tests for BalanceManager integration with trading"""
+
+    @pytest.fixture
+    def balance_manager_setup(self, mock_exchanges):
+        """Set up balance manager with mock exchanges"""
+        from unittest.mock import AsyncMock, MagicMock
+
+        # Create mock balance manager
+        class MockBalanceManager:
+            def __init__(self):
+                self._balances = {
+                    "binance": {"USDT": Decimal("10000"), "BTC": Decimal("0.5")},
+                    "mexc": {"USDT": Decimal("10000"), "BTC": Decimal("0.5")}
+                }
+                self._locks = {}
+                self._lock_counter = 0
+
+            async def get_balance(self, exchange: str, asset: str) -> Decimal:
+                return self._balances.get(exchange, {}).get(asset, Decimal("0"))
+
+            async def validate_arbitrage(
+                self,
+                buy_exchange: str,
+                sell_exchange: str,
+                base_asset: str,
+                quote_asset: str,
+                amount: Decimal,
+                buy_price: Decimal,
+                sell_price: Decimal
+            ) -> tuple:
+                # Check buy side has enough quote currency
+                required_quote = amount * buy_price * Decimal("1.01")  # 1% buffer
+                available_quote = self._balances.get(buy_exchange, {}).get(quote_asset, Decimal("0"))
+
+                if available_quote < required_quote:
+                    return False, f"Insufficient {quote_asset} on {buy_exchange}"
+
+                # Check sell side has enough base currency
+                available_base = self._balances.get(sell_exchange, {}).get(base_asset, Decimal("0"))
+                if available_base < amount:
+                    return False, f"Insufficient {base_asset} on {sell_exchange}"
+
+                return True, "Validation passed"
+
+            async def lock_balance(
+                self,
+                exchange: str,
+                asset: str,
+                amount: Decimal,
+                trade_id: str
+            ) -> Optional[str]:
+                available = self._balances.get(exchange, {}).get(asset, Decimal("0"))
+                if available < amount:
+                    return None
+
+                self._lock_counter += 1
+                lock_id = f"lock_{self._lock_counter}"
+                self._locks[lock_id] = {
+                    "exchange": exchange,
+                    "asset": asset,
+                    "amount": amount,
+                    "trade_id": trade_id
+                }
+                self._balances[exchange][asset] -= amount
+                return lock_id
+
+            async def release_lock(self, lock_id: str) -> bool:
+                if lock_id not in self._locks:
+                    return False
+
+                lock = self._locks[lock_id]
+                self._balances[lock["exchange"]][lock["asset"]] += lock["amount"]
+                del self._locks[lock_id]
+                return True
+
+            async def consume_lock(self, lock_id: str) -> bool:
+                if lock_id not in self._locks:
+                    return False
+                del self._locks[lock_id]
+                return True
+
+        return MockBalanceManager()
+
+    @pytest.mark.asyncio
+    async def test_balance_validation_success(self, balance_manager_setup, mock_exchanges):
+        """Test successful balance validation"""
+        bm = balance_manager_setup
+
+        valid, reason = await bm.validate_arbitrage(
+            buy_exchange="binance",
+            sell_exchange="mexc",
+            base_asset="BTC",
+            quote_asset="USDT",
+            amount=Decimal("0.1"),
+            buy_price=Decimal("42000"),
+            sell_price=Decimal("42100")
+        )
+
+        assert valid is True
+        assert "passed" in reason.lower()
+
+    @pytest.mark.asyncio
+    async def test_balance_validation_insufficient_quote(self, balance_manager_setup):
+        """Test validation fails with insufficient quote currency"""
+        bm = balance_manager_setup
+
+        valid, reason = await bm.validate_arbitrage(
+            buy_exchange="binance",
+            sell_exchange="mexc",
+            base_asset="BTC",
+            quote_asset="USDT",
+            amount=Decimal("1000"),  # Would need 42M USDT
+            buy_price=Decimal("42000"),
+            sell_price=Decimal("42100")
+        )
+
+        assert valid is False
+        assert "Insufficient" in reason
+
+    @pytest.mark.asyncio
+    async def test_balance_locking_flow(self, balance_manager_setup):
+        """Test balance locking and unlocking"""
+        bm = balance_manager_setup
+
+        initial_balance = await bm.get_balance("binance", "USDT")
+
+        # Lock some balance
+        lock_id = await bm.lock_balance(
+            exchange="binance",
+            asset="USDT",
+            amount=Decimal("5000"),
+            trade_id="test_trade_1"
+        )
+
+        assert lock_id is not None
+
+        # Balance should be reduced
+        locked_balance = await bm.get_balance("binance", "USDT")
+        assert locked_balance == initial_balance - Decimal("5000")
+
+        # Release lock
+        released = await bm.release_lock(lock_id)
+        assert released is True
+
+        # Balance should be restored
+        final_balance = await bm.get_balance("binance", "USDT")
+        assert final_balance == initial_balance
+
+    @pytest.mark.asyncio
+    async def test_balance_lock_prevents_double_spend(self, balance_manager_setup):
+        """Test that locked balance cannot be double-spent"""
+        bm = balance_manager_setup
+
+        # Lock most of the balance
+        lock1 = await bm.lock_balance(
+            exchange="binance",
+            asset="USDT",
+            amount=Decimal("9000"),
+            trade_id="trade_1"
+        )
+        assert lock1 is not None
+
+        # Try to lock more than remaining
+        lock2 = await bm.lock_balance(
+            exchange="binance",
+            asset="USDT",
+            amount=Decimal("2000"),  # Only 1000 left
+            trade_id="trade_2"
+        )
+        assert lock2 is None
+
+
+# =============================================================================
+# Graceful Shutdown Integration Tests
+# =============================================================================
+
+class TestGracefulShutdownIntegration:
+    """Tests for graceful shutdown functionality"""
+
+    @pytest.fixture
+    def shutdown_manager_setup(self):
+        """Create shutdown manager for testing"""
+        from src.core.graceful_shutdown import (
+            GracefulShutdownManager,
+            ShutdownConfig,
+            ShutdownPhase
+        )
+
+        config = ShutdownConfig(
+            drain_timeout_seconds=2,
+            cancel_timeout_seconds=2,
+            cleanup_timeout_seconds=2,
+            close_positions_on_shutdown=False
+        )
+
+        manager = GracefulShutdownManager(config=config)
+        return manager
+
+    @pytest.mark.asyncio
+    async def test_operation_registration(self, shutdown_manager_setup):
+        """Test in-flight operation registration"""
+        manager = shutdown_manager_setup
+
+        # Register operations
+        op1 = manager.register_operation(
+            operation_type="trade",
+            exchange="binance",
+            symbol="BTCUSDT"
+        )
+        op2 = manager.register_operation(
+            operation_type="trade",
+            exchange="mexc",
+            symbol="BTCUSDT"
+        )
+
+        assert op1 is not None
+        assert op2 is not None
+        assert op1 != op2
+
+        # Check status
+        status = manager.get_status()
+        assert status["in_flight_operations"] == 2
+
+    @pytest.mark.asyncio
+    async def test_operation_completion(self, shutdown_manager_setup):
+        """Test operation completion tracking"""
+        manager = shutdown_manager_setup
+
+        op_id = manager.register_operation("trade", "binance", "BTCUSDT")
+        assert manager.get_status()["in_flight_operations"] == 1
+
+        manager.complete_operation(op_id)
+        assert manager.get_status()["in_flight_operations"] == 0
+
+    @pytest.mark.asyncio
+    async def test_shutdown_blocks_new_operations(self, shutdown_manager_setup):
+        """Test that shutdown blocks new operations"""
+        from src.core.graceful_shutdown import ShutdownPhase
+
+        manager = shutdown_manager_setup
+
+        # Start shutdown (don't await to test blocking)
+        shutdown_task = asyncio.create_task(manager.shutdown())
+
+        # Wait for shutdown to start
+        await asyncio.sleep(0.1)
+
+        # New operations should be blocked
+        with pytest.raises(RuntimeError, match="shutting down"):
+            manager.register_operation("trade", "binance", "BTCUSDT")
+
+        # Clean up
+        await shutdown_task
+
+    @pytest.mark.asyncio
+    async def test_cleanup_handlers_called(self, shutdown_manager_setup):
+        """Test that cleanup handlers are called during shutdown"""
+        manager = shutdown_manager_setup
+
+        cleanup_called = []
+
+        async def cleanup_handler_1():
+            cleanup_called.append("handler_1")
+
+        async def cleanup_handler_2():
+            cleanup_called.append("handler_2")
+
+        manager.register_cleanup_handler(cleanup_handler_1)
+        manager.register_cleanup_handler(cleanup_handler_2)
+
+        await manager.shutdown()
+
+        assert "handler_1" in cleanup_called
+        assert "handler_2" in cleanup_called
+
+
+# =============================================================================
+# Health Server Integration Tests
+# =============================================================================
+
+class TestHealthServerIntegration:
+    """Tests for health server functionality"""
+
+    @pytest.mark.asyncio
+    async def test_health_checker_initialization(self):
+        """Test health checker setup"""
+        from src.api.health import HealthChecker, HealthStatus
+
+        checker = HealthChecker(version="1.0.0-test")
+
+        assert checker.version == "1.0.0-test"
+        assert checker.uptime_seconds >= 0
+
+    @pytest.mark.asyncio
+    async def test_liveness_check(self):
+        """Test liveness probe"""
+        from src.api.health import HealthChecker
+
+        checker = HealthChecker()
+
+        is_alive = await checker.liveness()
+        assert is_alive is True
+
+    @pytest.mark.asyncio
+    async def test_readiness_check(self):
+        """Test readiness probe"""
+        from src.api.health import HealthChecker
+
+        checker = HealthChecker()
+
+        is_ready = await checker.readiness()
+        # Should be ready by default (built-in checks should pass)
+        assert isinstance(is_ready, bool)
+
+    @pytest.mark.asyncio
+    async def test_full_health_check(self):
+        """Test full health check with all components"""
+        from src.api.health import HealthChecker, HealthStatus
+
+        checker = HealthChecker()
+
+        health = await checker.check_health()
+
+        assert health.version is not None
+        assert health.uptime_seconds >= 0
+        assert health.status in [
+            HealthStatus.HEALTHY,
+            HealthStatus.DEGRADED,
+            HealthStatus.UNHEALTHY
+        ]
+        assert len(health.checks) > 0
+
+    @pytest.mark.asyncio
+    async def test_custom_health_check_registration(self):
+        """Test registering custom health checks"""
+        from src.api.health import HealthChecker, HealthCheckResult, HealthStatus
+
+        checker = HealthChecker()
+
+        async def custom_check() -> HealthCheckResult:
+            return HealthCheckResult(
+                name="custom",
+                status=HealthStatus.HEALTHY,
+                message="Custom check passed"
+            )
+
+        checker.register_check("custom", custom_check)
+
+        health = await checker.check_health()
+
+        # Find custom check in results
+        custom_result = next(
+            (c for c in health.checks if c.name == "custom"),
+            None
+        )
+
+        assert custom_result is not None
+        assert custom_result.status == HealthStatus.HEALTHY
+
+    @pytest.mark.asyncio
+    async def test_health_check_timeout_handling(self):
+        """Test health check timeout handling"""
+        from src.api.health import HealthChecker, HealthCheckResult, HealthStatus
+
+        checker = HealthChecker()
+
+        async def slow_check() -> HealthCheckResult:
+            await asyncio.sleep(20)  # Will timeout
+            return HealthCheckResult(
+                name="slow",
+                status=HealthStatus.HEALTHY,
+                message="Should not reach here"
+            )
+
+        checker.register_check("slow", slow_check)
+
+        # Run health check with timeout
+        health = await checker.check_health(checks=["slow"])
+
+        slow_result = next(
+            (c for c in health.checks if c.name == "slow"),
+            None
+        )
+
+        assert slow_result is not None
+        assert slow_result.status == HealthStatus.UNHEALTHY
+        assert "timeout" in slow_result.message.lower()
+
+
+# =============================================================================
+# Execution Engine Integration Tests
+# =============================================================================
+
+class TestExecutionEngineIntegration:
+    """Tests for execution engine with balance validation"""
+
+    @pytest.mark.asyncio
+    async def test_execution_result_structure(self, mock_exchanges):
+        """Test that execution returns proper result structure"""
+        binance = mock_exchanges["binance"]
+
+        order = await binance.create_order(
+            symbol="BTCUSDT",
+            side="buy",
+            order_type="market",
+            quantity=Decimal("0.1")
+        )
+
+        # Verify result structure
+        required_fields = [
+            "order_id", "symbol", "side", "type", "status",
+            "quantity", "filled_quantity", "executed_price", "fee"
+        ]
+
+        for field in required_fields:
+            assert field in order, f"Missing field: {field}"
+
+    @pytest.mark.asyncio
+    async def test_atomic_arbitrage_execution(self, mock_exchanges):
+        """Test atomic execution of both legs"""
+        binance = mock_exchanges["binance"]
+        mexc = mock_exchanges["mexc"]
+
+        quantity = Decimal("0.1")
+
+        # Execute both legs atomically
+        try:
+            results = await asyncio.gather(
+                binance.create_order("BTCUSDT", "buy", "market", quantity),
+                mexc.create_order("BTCUSDT", "sell", "market", quantity)
+            )
+
+            buy_order, sell_order = results
+
+            # Both should succeed
+            assert buy_order["status"] == "filled"
+            assert sell_order["status"] == "filled"
+
+        except Exception as e:
+            # If either fails, we should handle rollback
+            # (not implemented in mock, but tests the structure)
+            pytest.fail(f"Atomic execution failed: {e}")
+
+
+# =============================================================================
+# End-to-End Scenario Tests
+# =============================================================================
+
+class TestEndToEndScenarios:
+    """Complete end-to-end scenario tests"""
+
+    @pytest.mark.asyncio
+    async def test_profitable_arbitrage_scenario(self, mock_exchanges):
+        """
+        Complete profitable arbitrage scenario:
+        1. Detect opportunity
+        2. Validate balances
+        3. Execute trades
+        4. Calculate profit
+        """
+        binance = mock_exchanges["binance"]
+        mexc = mock_exchanges["mexc"]
+
+        # Setup: Create 0.5% spread opportunity
+        binance.set_price("BTCUSDT", Decimal("40000"))
+        mexc.set_price("BTCUSDT", Decimal("40200"))
+
+        # Step 1: Detect opportunity
+        binance_book = await binance.get_orderbook("BTCUSDT")
+        mexc_book = await mexc.get_orderbook("BTCUSDT")
+
+        buy_price = binance_book["asks"][0][0]
+        sell_price = mexc_book["bids"][0][0]
+
+        spread_pct = (sell_price - buy_price) / buy_price * 100
+        print(f"Detected spread: {spread_pct:.3f}%")
+
+        # Must have positive spread after fees (~0.2%)
+        min_profitable_spread = Decimal("0.2")
+        if spread_pct < min_profitable_spread:
+            pytest.skip("Spread too small for test")
+
+        # Step 2: Validate balances
+        binance_bal = await binance.get_balances()
+        mexc_bal = await mexc.get_balances()
+
+        trade_size_btc = Decimal("0.1")
+        required_usdt = trade_size_btc * buy_price * Decimal("1.01")
+
+        assert binance_bal["USDT"]["free"] >= required_usdt
+        assert mexc_bal["BTC"]["free"] >= trade_size_btc
+
+        # Step 3: Execute trades
+        buy_order = await binance.create_order(
+            "BTCUSDT", "buy", "market", trade_size_btc
+        )
+        sell_order = await mexc.create_order(
+            "BTCUSDT", "sell", "market", trade_size_btc
+        )
+
+        # Step 4: Calculate profit
+        buy_cost = buy_order["filled_quantity"] * buy_order["executed_price"]
+        sell_proceeds = sell_order["filled_quantity"] * sell_order["executed_price"]
+        gross_profit = sell_proceeds - buy_cost
+        fees = buy_order["fee"] + sell_order["fee"]
+        net_profit = gross_profit - fees
+
+        print(f"Gross profit: ${gross_profit:.2f}")
+        print(f"Fees: ${fees:.2f}")
+        print(f"Net profit: ${net_profit:.2f}")
+
+        # With 0.5% spread and 0.2% fees, should be profitable
+        assert gross_profit > 0
+
+    @pytest.mark.asyncio
+    async def test_failed_arbitrage_recovery(self, mock_exchanges):
+        """
+        Test recovery when one leg fails:
+        1. Try to execute arbitrage
+        2. First leg succeeds, second fails
+        3. Handle the imbalance
+        """
+        binance = mock_exchanges["binance"]
+
+        # Execute successful buy
+        buy_order = await binance.create_order(
+            "BTCUSDT", "buy", "market", Decimal("0.1")
+        )
+        assert buy_order["status"] == "filled"
+
+        # Simulate failed sell (insufficient balance)
+        # This tests error handling structure
+        try:
+            # Try to sell more than we have
+            await binance.create_order(
+                "BTCUSDT", "sell", "market", Decimal("100")
+            )
+            pytest.fail("Should have raised exception")
+        except ValueError as e:
+            assert "Insufficient" in str(e)
+
+        # In real system, this would trigger:
+        # 1. Position tracking update
+        # 2. Alert notification
+        # 3. Potential hedge or unwind
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

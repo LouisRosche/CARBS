@@ -32,6 +32,13 @@ from utils.cache import RedisCache
 from utils.metrics import MetricsCollector
 from config.settings import load_config, ConfigLoadError, ConfigValidationError
 
+# Import health server
+try:
+    from api.health_server import HealthServer
+    HEALTH_SERVER_AVAILABLE = True
+except ImportError:
+    HEALTH_SERVER_AVAILABLE = False
+
 # Import optional modules with graceful fallbacks
 try:
     from core.antifragile import AntifragileCore
@@ -106,6 +113,9 @@ class AdvancedArbitrageBot:
         self.notification_manager = None
         self.compliance_manager = None
 
+        # Health server for Kubernetes probes
+        self.health_server = None
+
         self.running = False
         self.shutdown_event = asyncio.Event()
 
@@ -153,6 +163,22 @@ class AdvancedArbitrageBot:
         # Initialize exchanges
         await self._initialize_exchanges()
 
+        # Initialize health server for Kubernetes probes
+        if HEALTH_SERVER_AVAILABLE:
+            try:
+                health_port = self.config.monitoring.get('health_port', 8080)
+                self.health_server = HealthServer(
+                    port=health_port,
+                    db_pool=self.db_pool,
+                    redis_client=self.cache,
+                    exchanges=self.exchanges,
+                    version="1.0.0"
+                )
+                await self.health_server.start()
+                logger.info(f"✓ Health server started on port {health_port}")
+            except Exception as e:
+                logger.warning(f"⚠ Health server failed to start: {e}")
+
         # Initialize advanced components
         self.advanced_engine = AdvancedArbitrageEngine(self.config)
         self.execution_engine = ExecutionEngine(self.config, self.exchanges)
@@ -167,6 +193,8 @@ class AdvancedArbitrageBot:
         logger.info(f"📝 Mode: {'PAPER TRADING' if self.config.trading.mode == 'paper' else 'LIVE TRADING'}")
 
         features = ["ML Scoring", "Risk Management", "Circuit Breakers"]
+        if self.health_server:
+            features.append("Health Server")
         if self.antifragile:
             features.append("Antifragile Adaptation")
         if self.signal_manager:
@@ -849,6 +877,14 @@ class AdvancedArbitrageBot:
         logger.info(f"Final Capital: ${risk_summary['current_capital']:.2f}")
         logger.info(f"Sharpe Ratio: {risk_summary['sharpe_ratio']}")
         logger.info("="*80 + "\n")
+
+        # Shutdown health server
+        if self.health_server:
+            try:
+                await self.health_server.stop()
+                logger.info("✓ Health server stopped")
+            except Exception as e:
+                logger.warning(f"Health server shutdown error: {e}")
 
         # Shutdown optional modules
         if self.antifragile:
