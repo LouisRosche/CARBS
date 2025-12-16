@@ -461,6 +461,95 @@ class ExecutionEngine:
             f"{symbol} amount={amount} buy@{buy_price} sell@{sell_price}"
         )
 
+    def validate_order_book_depth(
+        self,
+        orderbook: 'EnhancedOrderBook',
+        side: str,
+        amount: Decimal,
+        limit_price: Decimal,
+        max_slippage_percent: Decimal = Decimal('0.5')
+    ) -> tuple[bool, str, Decimal]:
+        """
+        Validate that order can be filled within acceptable slippage from order book depth.
+
+        Args:
+            orderbook: Order book with bids/asks
+            side: 'buy' or 'sell'
+            amount: Amount to trade
+            limit_price: Expected execution price
+            max_slippage_percent: Maximum acceptable slippage (default 0.5%)
+
+        Returns:
+            Tuple of (is_valid, reason, estimated_avg_price)
+        """
+        if not orderbook:
+            return False, "Order book not available", Decimal('0')
+
+        # Get relevant side of the book
+        if side.lower() == 'buy':
+            # Buying: look at asks (we take liquidity from asks)
+            levels = orderbook.asks if hasattr(orderbook, 'asks') else []
+        else:
+            # Selling: look at bids (we take liquidity from bids)
+            levels = orderbook.bids if hasattr(orderbook, 'bids') else []
+
+        if not levels:
+            return False, f"No {side} liquidity in order book", Decimal('0')
+
+        # Calculate how much of order can be filled and at what average price
+        remaining = amount
+        total_cost = Decimal('0')
+        total_filled = Decimal('0')
+
+        for price, qty in levels:
+            if remaining <= 0:
+                break
+
+            # Convert to Decimal if needed
+            price = Decimal(str(price)) if not isinstance(price, Decimal) else price
+            qty = Decimal(str(qty)) if not isinstance(qty, Decimal) else qty
+
+            # For buy orders, only consider asks at or below our limit
+            # For sell orders, only consider bids at or above our limit
+            if side.lower() == 'buy' and price > limit_price * (1 + max_slippage_percent / 100):
+                break
+            if side.lower() == 'sell' and price < limit_price * (1 - max_slippage_percent / 100):
+                break
+
+            fill_qty = min(remaining, qty)
+            total_cost += fill_qty * price
+            total_filled += fill_qty
+            remaining -= fill_qty
+
+        # Check if we can fill the full order
+        if total_filled < amount:
+            fill_percent = (total_filled / amount * 100) if amount > 0 else Decimal('0')
+            return False, (
+                f"Insufficient liquidity: can only fill {total_filled:.4f} of {amount:.4f} "
+                f"({fill_percent:.1f}%) within {max_slippage_percent}% slippage"
+            ), Decimal('0')
+
+        # Calculate average fill price
+        avg_price = total_cost / total_filled if total_filled > 0 else limit_price
+
+        # Calculate actual slippage
+        if side.lower() == 'buy':
+            slippage = ((avg_price - limit_price) / limit_price) * 100
+        else:
+            slippage = ((limit_price - avg_price) / limit_price) * 100
+
+        if slippage > max_slippage_percent:
+            return False, (
+                f"Slippage too high: {slippage:.2f}% exceeds max {max_slippage_percent}%"
+            ), avg_price
+
+        logger.debug(
+            f"Order book validation passed: {side} {amount} @ {limit_price}, "
+            f"estimated avg price: {avg_price:.4f}, slippage: {slippage:.3f}%"
+        )
+
+        return True, "OK", avg_price
+
     async def execute_arbitrage(
         self,
         buy_exchange: str,
@@ -468,7 +557,10 @@ class ExecutionEngine:
         symbol: str,
         buy_price: Decimal,
         sell_price: Decimal,
-        amount: Decimal
+        amount: Decimal,
+        buy_orderbook: 'EnhancedOrderBook' = None,
+        sell_orderbook: 'EnhancedOrderBook' = None,
+        max_slippage_percent: Decimal = Decimal('0.5')
     ) -> ExecutionResult:
         """
         Execute arbitrage trade with both legs
@@ -480,6 +572,9 @@ class ExecutionEngine:
             buy_price: Limit price for buy
             sell_price: Limit price for sell
             amount: Amount to trade
+            buy_orderbook: Order book for buy exchange (for depth validation)
+            sell_orderbook: Order book for sell exchange (for depth validation)
+            max_slippage_percent: Maximum acceptable slippage per leg
 
         Returns:
             ExecutionResult with success status and details
@@ -501,6 +596,33 @@ class ExecutionEngine:
             result.error_message = f"Validation failed: {e}"
             logger.error(f"❌ Arbitrage validation failed: {e}")
             return result
+
+        # Validate order book depth if order books provided
+        if buy_orderbook:
+            valid, reason, _ = self.validate_order_book_depth(
+                orderbook=buy_orderbook,
+                side='buy',
+                amount=amount,
+                limit_price=buy_price,
+                max_slippage_percent=max_slippage_percent
+            )
+            if not valid:
+                result.error_message = f"Buy order book validation failed: {reason}"
+                logger.warning(f"⚠️ {result.error_message}")
+                return result
+
+        if sell_orderbook:
+            valid, reason, _ = self.validate_order_book_depth(
+                orderbook=sell_orderbook,
+                side='sell',
+                amount=amount,
+                limit_price=sell_price,
+                max_slippage_percent=max_slippage_percent
+            )
+            if not valid:
+                result.error_message = f"Sell order book validation failed: {reason}"
+                logger.warning(f"⚠️ {result.error_message}")
+                return result
 
         # Parse symbol to get base and quote assets
         base_asset, quote_asset = parse_symbol(symbol)

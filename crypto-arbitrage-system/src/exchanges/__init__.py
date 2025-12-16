@@ -169,13 +169,25 @@ class BaseExchange(ABC):
         testnet: bool = False,
         rate_limit: float = 10
     ):
-        self.api_key = api_key
-        self.api_secret = api_secret
+        # Store credentials securely encrypted in memory
+        from ..utils.secure_credentials import SecureString
+        self._api_key = SecureString(api_key) if api_key else None
+        self._api_secret = SecureString(api_secret) if api_secret else None
         self.testnet = testnet
         self.rate_limiter = RateLimiter(rate_limit)
 
         self._session: Optional[aiohttp.ClientSession] = None
         self._ws: Optional[aiohttp.ClientWebSocketResponse] = None
+
+    @property
+    def api_key(self) -> str:
+        """Get decrypted API key."""
+        return self._api_key.get() if self._api_key else ""
+
+    @property
+    def api_secret(self) -> str:
+        """Get decrypted API secret."""
+        return self._api_secret.get() if self._api_secret else ""
 
     @property
     @abstractmethod
@@ -211,11 +223,16 @@ class BaseExchange(ABC):
             )
 
     async def close(self):
-        """Close connections"""
+        """Close connections and securely clear credentials"""
         if self._session:
             await self._session.close()
         if self._ws:
             await self._ws.close()
+        # Securely clear credentials from memory
+        if self._api_key:
+            self._api_key.clear()
+        if self._api_secret:
+            self._api_secret.clear()
 
     @abstractmethod
     async def get_ticker(self, symbol: str) -> Ticker:
