@@ -308,7 +308,8 @@ class WebSocketHandler(ABC):
                 await asyncio.sleep(self._ping_interval)
                 if self._ws:
                     await self._ws.ping()
-            except Exception:
+            except Exception as e:
+                logger.debug(f"{self.exchange} ping failed, triggering reconnect: {e}")
                 break
 
     def _get_channels(self, stream_type: StreamType, symbols: List[str]) -> List[str]:
@@ -613,7 +614,8 @@ class KuCoinWebSocket(WebSocketHandler):
                         "id": self._connect_id,
                         "type": "ping"
                     })
-            except Exception:
+            except Exception as e:
+                logger.debug(f"KuCoin ping failed, triggering reconnect: {e}")
                 break
 
 
