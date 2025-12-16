@@ -411,8 +411,37 @@ class TriangleArbitrageEngine:
             gross_profit = ending_amount - starting_amount
             gross_profit_pct = (gross_profit / starting_amount) * 100
 
-            total_fees = leg1_fee + leg2_fee + leg3_fee
-            total_fees_in_base = total_fees  # Simplified - actual would need price conversion
+            # Convert all fees to base currency for accurate total
+            # leg1_fee is in intermediate_a, convert to base using leg1 price
+            # leg2_fee is in intermediate_b, convert via leg2 and leg3 prices
+            # leg3_fee is already in base currency
+            try:
+                if leg1_side == "buy":
+                    # leg1_fee is in intermediate_a, convert to base: fee * price
+                    leg1_fee_in_base = leg1_fee * leg1_price
+                else:
+                    # leg1_fee is in intermediate_a, convert to base: fee / price
+                    leg1_fee_in_base = leg1_fee / leg1_price if leg1_price > 0 else Decimal("0")
+
+                if leg2_side == "buy":
+                    # leg2_fee is in intermediate_b
+                    leg2_fee_in_b = leg2_fee
+                else:
+                    leg2_fee_in_b = leg2_fee
+
+                # Convert leg2_fee from intermediate_b to base using leg3 price
+                if leg3_side == "buy":
+                    leg2_fee_in_base = leg2_fee_in_b / leg3_price if leg3_price > 0 else Decimal("0")
+                else:
+                    leg2_fee_in_base = leg2_fee_in_b * leg3_price
+
+                # leg3_fee is already in base currency
+                leg3_fee_in_base = leg3_fee
+
+                total_fees_in_base = leg1_fee_in_base + leg2_fee_in_base + leg3_fee_in_base
+            except (ZeroDivisionError, InvalidOperation):
+                # Fallback to simple sum if conversion fails
+                total_fees_in_base = leg3_fee  # At least count the final leg fee
 
             net_profit = ending_amount - starting_amount
             net_profit_pct = (net_profit / starting_amount) * 100

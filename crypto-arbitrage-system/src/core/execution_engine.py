@@ -16,6 +16,7 @@ Based on resilience patterns from:
 """
 
 import asyncio
+import random
 import re
 from decimal import Decimal, InvalidOperation
 from typing import Dict, Optional, List
@@ -323,9 +324,10 @@ class ExecutionEngine:
                 time_window_seconds=60
             )
 
-        # Execution tracking
+        # Execution tracking with thread-safe access
         self.active_orders: Dict[str, OrderState] = {}
         self.execution_history: List[ExecutionResult] = []
+        self._orders_lock = asyncio.Lock()  # Protects active_orders and execution_history
 
         # Retry configuration (from centralized defaults)
         self.max_retries = RETRY.MAX_RETRIES
@@ -640,8 +642,9 @@ class ExecutionEngine:
                 if base_lock:
                     await self.balance_manager.release_lock(base_lock)
 
-        # Store in history
-        self.execution_history.append(result)
+        # Store in history (thread-safe)
+        async with self._orders_lock:
+            self.execution_history.append(result)
 
         return result
 
@@ -750,10 +753,13 @@ class ExecutionEngine:
             order.error_message = str(e)
             order.updated_at = datetime.now(timezone.utc)
 
-            # Retry logic
+            # Retry logic with jitter to prevent thundering herd
             if retry_count < self.max_retries:
-                backoff = self.base_backoff_seconds * (2 ** retry_count)
-                logger.info(f"Retrying in {backoff}s (attempt {retry_count + 1})")
+                base_backoff = self.base_backoff_seconds * (2 ** retry_count)
+                # Add jitter: 50-150% of base backoff
+                jitter = base_backoff * (0.5 + random.random())
+                backoff = base_backoff * 0.5 + jitter
+                logger.info(f"Retrying in {backoff:.2f}s (attempt {retry_count + 1})")
                 await asyncio.sleep(backoff)
                 return await self._execute_order(
                     exchange_name, symbol, side, amount, price, retry_count + 1
@@ -962,23 +968,27 @@ class ExecutionEngine:
         exchange_name: str,
         order_id: str
     ) -> bool:
-        """Cancel an active order"""
+        """Cancel an active order (thread-safe)"""
         try:
-            if order_id in self.active_orders:
-                order = self.active_orders[order_id]
-                order.status = OrderStatus.CANCELLED
-                order.updated_at = datetime.now(timezone.utc)
-                del self.active_orders[order_id]
-                logger.info(f"Order {order_id} cancelled")
-                return True
+            async with self._orders_lock:
+                if order_id in self.active_orders:
+                    order = self.active_orders[order_id]
+                    order.status = OrderStatus.CANCELLED
+                    order.updated_at = datetime.now(timezone.utc)
+                    del self.active_orders[order_id]
+                    logger.info(f"Order {order_id} cancelled")
+                    return True
         except Exception as e:
             logger.error(f"Failed to cancel order {order_id}: {e}")
 
         return False
 
     def get_execution_stats(self) -> Dict:
-        """Get execution statistics"""
-        if not self.execution_history:
+        """Get execution statistics (thread-safe snapshot)"""
+        # Take a snapshot to avoid race conditions during iteration
+        history_snapshot = list(self.execution_history)
+
+        if not history_snapshot:
             return {
                 'total_executions': 0,
                 'successful': 0,
@@ -988,17 +998,17 @@ class ExecutionEngine:
                 'total_profit': 0.0
             }
 
-        successful = [e for e in self.execution_history if e.success]
-        failed = [e for e in self.execution_history if not e.success]
+        successful = [e for e in history_snapshot if e.success]
+        failed = [e for e in history_snapshot if not e.success]
 
         total_profit = sum(float(e.net_profit) for e in successful)
         avg_time = sum(e.execution_time_ms for e in successful) / len(successful) if successful else 0
 
         return {
-            'total_executions': len(self.execution_history),
+            'total_executions': len(history_snapshot),
             'successful': len(successful),
             'failed': len(failed),
-            'success_rate': len(successful) / len(self.execution_history) if self.execution_history else 0.0,
+            'success_rate': len(successful) / len(history_snapshot) if history_snapshot else 0.0,
             'avg_execution_time_ms': int(avg_time),
             'total_profit': total_profit
         }

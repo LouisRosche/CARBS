@@ -210,7 +210,7 @@ class BalanceManager:
             try:
                 await asyncio.sleep(self.refresh_interval)
                 await self.refresh_all_balances()
-                self._cleanup_expired_locks()
+                await self._cleanup_expired_locks()
             except asyncio.CancelledError:
                 break
             except Exception as e:
@@ -521,20 +521,21 @@ class BalanceManager:
             logger.debug(f"Released lock {lock_id}")
             return True
 
-    def _cleanup_expired_locks(self):
-        """Remove expired locks"""
-        expired = [
-            lock_id for lock_id, lock in self._locks.items()
-            if lock.is_expired
-        ]
+    async def _cleanup_expired_locks(self):
+        """Remove expired locks (thread-safe)"""
+        async with self._lock:
+            expired = [
+                lock_id for lock_id, lock in self._locks.items()
+                if lock.is_expired
+            ]
 
-        for lock_id in expired:
-            lock = self._locks[lock_id]
-            lock.status = LockStatus.EXPIRED
-            del self._locks[lock_id]
-            logger.warning(
-                f"Lock {lock_id} expired: {lock.amount} {lock.asset} on {lock.exchange}"
-            )
+            for lock_id in expired:
+                lock = self._locks[lock_id]
+                lock.status = LockStatus.EXPIRED
+                del self._locks[lock_id]
+                logger.warning(
+                    f"Lock {lock_id} expired: {lock.amount} {lock.asset} on {lock.exchange}"
+                )
 
     def get_all_balances(self) -> Dict[str, Dict[str, BalanceSnapshot]]:
         """Get all balances across all exchanges"""
