@@ -1,86 +1,45 @@
 """
 Main entry point for crypto arbitrage system
+
+DEPRECATED: This module is a compatibility wrapper.
+Please use advanced_main.py directly for the full-featured bot:
+    python -m src.advanced_main
+
+Or use the CLI:
+    carbs start --mode paper
 """
-import asyncio
+import warnings
 import logging
-import signal
-import sys
-from pathlib import Path
-
-from core.engine import ArbitrageEngine
-from config.settings import load_config, ConfigLoadError, ConfigValidationError
-
-# Ensure log directory exists
-log_dir = Path('data/logs')
-log_dir.mkdir(parents=True, exist_ok=True)
-
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.StreamHandler(sys.stdout),
-        logging.FileHandler(log_dir / 'arbitrage.log')
-    ]
-)
 
 logger = logging.getLogger(__name__)
 
-
-class ArbitrageBot:
-    def __init__(self):
-        self.engine = None
-        self.shutdown_event = asyncio.Event()
-        
-    async def start(self):
-        """Start the arbitrage bot"""
-        try:
-            # Load configuration with proper error handling
-            try:
-                config = load_config()
-            except ConfigLoadError as e:
-                logger.error(f"Failed to load configuration: {e}")
-                raise SystemExit(1)
-            except ConfigValidationError as e:
-                logger.error(f"Invalid configuration: {e}")
-                raise SystemExit(1)
-
-            # Initialize engine
-            self.engine = ArbitrageEngine(config)
-
-            # Setup signal handlers
-            loop = asyncio.get_running_loop()
-            for sig in (signal.SIGTERM, signal.SIGINT):
-                loop.add_signal_handler(sig, lambda: asyncio.create_task(self.stop()))
-
-            # Run engine
-            await self.engine.run()
-
-        except SystemExit:
-            raise
-        except Exception as e:
-            logger.error(f"Fatal error: {e}", exc_info=True)
-            raise
-            
-    async def stop(self):
-        """Stop the bot gracefully"""
-        logger.info("Shutdown signal received")
-        if self.engine:
-            await self.engine.shutdown()
-        self.shutdown_event.set()
+# Issue deprecation warning
+warnings.warn(
+    "main.py is deprecated. Use advanced_main.py for the full-featured bot. "
+    "Run: python -m src.advanced_main",
+    DeprecationWarning,
+    stacklevel=2
+)
 
 
-async def main():
-    """Main entry point"""
-    bot = ArbitrageBot()
-    
-    try:
-        await bot.start()
-    except KeyboardInterrupt:
-        logger.info("Interrupted by user")
-    finally:
-        await bot.stop()
+def main():
+    """
+    Main entry point - redirects to advanced_main
+
+    This maintains backward compatibility while encouraging
+    migration to the full-featured advanced_main.
+    """
+    logger.warning(
+        "main.py is deprecated. Redirecting to advanced_main.py. "
+        "Please update your scripts to use: python -m src.advanced_main"
+    )
+
+    # Import and run advanced_main
+    from advanced_main import main as advanced_main
+    import asyncio
+
+    asyncio.run(advanced_main())
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()

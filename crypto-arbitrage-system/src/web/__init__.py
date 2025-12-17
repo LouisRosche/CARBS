@@ -828,7 +828,7 @@ async def health_check():
 
 def run_dashboard(host: str = "127.0.0.1", port: int = 8080):
     """Run the dashboard server"""
-    print(f"\n  CARBS Dashboard running at http://{host}:{port}\n")
+    logger.info(f"CARBS Dashboard starting at http://{host}:{port}")
     uvicorn.run(app, host=host, port=port, log_level="warning")
 
 
