@@ -48,7 +48,16 @@ jobs:
           pip install mypy types-redis types-PyYAML types-aiofiles
 
       - name: Type check with mypy
-        run: mypy src/ --ignore-missing-imports --no-error-summary || true
+        run: |
+          echo "Running mypy type checking..."
+          mypy src/ --ignore-missing-imports --no-error-summary > mypy-output.txt 2>&1 || MYPY_EXIT=$?
+
+          if [ -n "$MYPY_EXIT" ] && [ "$MYPY_EXIT" -ne 0 ]; then
+            echo "::warning::⚠️ Mypy found type errors"
+            cat mypy-output.txt
+          else
+            echo "✅ No type errors found"
+          fi
 
   test:
     runs-on: ubuntu-latest
@@ -124,7 +133,26 @@ jobs:
           pip install bandit safety
 
       - name: Run bandit security scan
-        run: bandit -r src/ -ll --skip B101 || true
+        run: |
+          echo "Running Bandit security scan..."
+          bandit -r src/ -ll --skip B101 > bandit-output.txt 2>&1 || BANDIT_EXIT=$?
+
+          if [ -n "$BANDIT_EXIT" ] && [ "$BANDIT_EXIT" -ne 0 ]; then
+            echo "::warning::⚠️ Bandit detected potential security issues"
+            cat bandit-output.txt
+          else
+            echo "✅ No security issues found by Bandit"
+            cat bandit-output.txt
+          fi
 
       - name: Check for vulnerable dependencies
-        run: safety check -r requirements.txt --full-report || true
+        run: |
+          echo "Checking for vulnerable dependencies..."
+          safety check -r requirements.txt --full-report > safety-output.txt 2>&1 || SAFETY_EXIT=$?
+
+          if [ -n "$SAFETY_EXIT" ] && [ "$SAFETY_EXIT" -ne 0 ]; then
+            echo "::warning::⚠️ Safety detected vulnerable dependencies"
+            cat safety-output.txt
+          else
+            echo "✅ No vulnerable dependencies found"
+          fi

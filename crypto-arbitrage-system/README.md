@@ -5,6 +5,26 @@ Production-ready cryptocurrency arbitrage detection and execution platform.
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
+---
+
+## ⚠️ **CRITICAL: RISK DISCLAIMER**
+
+**🚨 CRYPTOCURRENCY TRADING CARRIES SIGNIFICANT FINANCIAL RISK 🚨**
+
+- **This software is for EDUCATIONAL and RESEARCH purposes**
+- **NOT financial advice** — Consult qualified professionals before trading
+- **You can LOSE ALL your capital** — Never invest more than you can afford to lose
+- **No profitability guarantees** — Past performance does not indicate future results
+- **Paper trade FIRST** — Run in paper trading mode for 2+ weeks minimum before considering live trading
+- **Start with minimal capital** — If you choose to trade live, start with the smallest possible amounts ($100-500 max)
+- **You assume ALL risk** — The authors accept NO liability for any financial losses
+
+**By using this software, you acknowledge these risks and take full responsibility for your trading decisions.**
+
+📋 See [PRODUCTION_READINESS.md](PRODUCTION_READINESS.md) for detailed safety checklist before live trading.
+
+---
+
 ## Features
 
 **Core Trading**
