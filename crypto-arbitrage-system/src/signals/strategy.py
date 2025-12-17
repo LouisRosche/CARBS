@@ -586,20 +586,20 @@ async def demo():
 
     # Get recommendations
     rec = SmallCapitalOptimizer.get_recommended_exchange(Decimal("100"))
-    print(f"\nExchange recommendation: {rec['primary']}")
-    print(f"Reason: {rec['reason']}")
-    print(f"Warnings: {rec['warnings']}")
+    logger.info(f"Exchange recommendation: {rec['primary']}")
+    logger.info(f"Reason: {rec['reason']}")
+    logger.info(f"Warnings: {rec['warnings']}")
 
     # Get strategy summary
     summary = strategy.get_strategy_summary()
-    print(f"\nStrategy Summary:")
-    print(f"  Min profitable move: {summary['min_profitable_move_percent']:.2f}%")
+    logger.info(f"Strategy Summary:")
+    logger.info(f"  Min profitable move: {summary['min_profitable_move_percent']:.2f}%")
 
     # Get trading rules
     rules = SmallCapitalOptimizer.get_small_capital_rules()
-    print(f"\nTrading Rules for Small Capital:")
+    logger.info(f"Trading Rules for Small Capital:")
     for mindset in rules["mindset"]:
-        print(f"  • {mindset}")
+        logger.info(f"  • {mindset}")
 
 
 if __name__ == "__main__":
