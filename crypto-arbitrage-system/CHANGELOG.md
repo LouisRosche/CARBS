@@ -24,10 +24,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - 9 bare except clauses that could mask critical exceptions
 
-## [1.0.0] - 2024-01-15
+## [1.0.0] - 2025-10-27
 
 ### Added
-- Initial release of CARBS
+- Initial release of CARBS (first commit: 2025-10-27)
 - Multi-exchange arbitrage detection (Binance, Coinbase, Kraken, KuCoin, MEXC)
 - Real-time WebSocket order book streaming
 - ML-based 6-factor opportunity scoring
