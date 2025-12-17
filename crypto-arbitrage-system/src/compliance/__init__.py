@@ -16,6 +16,7 @@ Tax Compliance:
 - Form 1099-B generation
 - Cost basis reconciliation
 - Multi-jurisdiction support
+- Missouri state tax reporting (capital gains exemption as of Aug 28, 2025)
 
 Regulatory Reporting:
 - FinCEN compliance (CTR, SAR, Travel Rule)
@@ -47,6 +48,7 @@ Module Structure:
 - cost_basis.py: CostBasisTracker
 - journal.py: TradeJournal
 - exporter.py: DataExporter
+- missouri_tax.py: MissouriTaxCalculator, MissouriFormGenerator, export_missouri_tax_package
 - gdpr.py: GDPRCompliance
 - soc2.py: SOC2Controls
 """
@@ -59,6 +61,7 @@ from .models import TaxLot, DispositionRecord, TradeJournalEntry
 from .cost_basis import CostBasisTracker
 from .journal import TradeJournal
 from .exporter import DataExporter
+from .missouri_tax import MissouriTaxCalculator, MissouriFormGenerator, export_missouri_tax_package
 from .gdpr import GDPRCompliance
 from .soc2 import SOC2Controls
 
@@ -96,9 +99,12 @@ __all__ = [
     "CostBasisTracker",
     "TradeJournal",
     "DataExporter",
+    "MissouriTaxCalculator",
+    "MissouriFormGenerator",
     "GDPRCompliance",
     "SOC2Controls",
 
     # Functions
     "create_compliance_suite",
+    "export_missouri_tax_package",
 ]
