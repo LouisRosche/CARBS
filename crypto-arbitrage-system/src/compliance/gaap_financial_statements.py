@@ -552,8 +552,8 @@ class FinancialStatementPackage:
                         balance = await db_manager.balances.get_latest(exchange, currency)
                         if balance:
                             total_cash += balance.total
-                    except:
-                        pass
+                    except Exception:
+                        pass  # Balance unavailable for this exchange/currency pair
 
         self.balance_sheet.add_item(BalanceSheetItem(
             category="assets",
@@ -571,8 +571,8 @@ class FinancialStatementPackage:
                 for pos in positions:
                     if pos.market_value:
                         total_trading_assets += pos.market_value
-            except:
-                pass
+            except Exception:
+                pass  # Positions unavailable
 
         self.balance_sheet.add_item(BalanceSheetItem(
             category="assets",
@@ -612,8 +612,8 @@ class FinancialStatementPackage:
                 for trade in recent_trades:
                     if trade.status.value in ['pending', 'submitted']:
                         accrued_fees += trade.fee
-            except:
-                pass
+            except Exception:
+                pass  # Trades unavailable
 
         self.balance_sheet.add_item(BalanceSheetItem(
             category="liabilities",
@@ -632,8 +632,8 @@ class FinancialStatementPackage:
                 stats = await db_manager.trades.get_daily_stats()
                 if stats and 'net_pnl' in stats:
                     retained_earnings = Decimal(str(stats['net_pnl'] or 0))
-            except:
-                pass
+            except Exception:
+                pass  # Trade stats unavailable
 
         self.balance_sheet.add_item(BalanceSheetItem(
             category="equity",
@@ -651,8 +651,8 @@ class FinancialStatementPackage:
                 for pos in positions:
                     if pos.unrealized_pnl:
                         aoci += pos.unrealized_pnl
-            except:
-                pass
+            except Exception:
+                pass  # Positions unavailable
 
         self.balance_sheet.add_item(BalanceSheetItem(
             category="equity",
@@ -676,8 +676,8 @@ class FinancialStatementPackage:
                 )
                 if stats and 'total_profit' in stats:
                     trading_revenue = Decimal(str(stats['total_profit'] or 0))
-            except:
-                pass
+            except Exception:
+                pass  # Arbitrage stats unavailable
 
         self.income_statement.add_item(IncomeStatementItem(
             category="revenue",
@@ -694,8 +694,8 @@ class FinancialStatementPackage:
                 for pos in positions:
                     if pos.realized_pnl:
                         realized_gains += pos.realized_pnl
-            except:
-                pass
+            except Exception:
+                pass  # Positions unavailable
 
         self.income_statement.add_item(IncomeStatementItem(
             category="revenue",
@@ -713,8 +713,8 @@ class FinancialStatementPackage:
                 stats = await db_manager.trades.get_daily_stats()
                 if stats and 'total_fees' in stats:
                     total_fees = Decimal(str(stats['total_fees'] or 0))
-            except:
-                pass
+            except Exception:
+                pass  # Trade stats unavailable
 
         self.income_statement.add_item(IncomeStatementItem(
             category="cost_of_revenue",
@@ -762,8 +762,8 @@ class FinancialStatementPackage:
                 for pos in positions:
                     if pos.unrealized_pnl:
                         unrealized_gains += pos.unrealized_pnl
-            except:
-                pass
+            except Exception:
+                pass  # Positions unavailable
 
         self.cash_flow_statement.add_item(CashFlowItem(
             category="operating",
