@@ -48,6 +48,27 @@ class KuCoinExchange(BaseExchange):
         testnet: bool = False,
         rate_limit: float = 10
     ):
+        # CRITICAL COMPLIANCE CHECK: KuCoin is prohibited for US persons
+        # CFTC and FinCEN enforcement actions filed in 2024
+        # See docs/EXCHANGE_COMPLIANCE.md for full details
+        user_jurisdiction = os.getenv('USER_JURISDICTION', '').upper()
+        if user_jurisdiction == 'US':
+            raise ExchangeError(
+                "⚠️ REGULATORY VIOLATION: KuCoin is PROHIBITED for US persons.\n"
+                "KuCoin faces active CFTC and FinCEN enforcement actions.\n"
+                "Using KuCoin as a US person violates federal law.\n"
+                "See docs/EXCHANGE_COMPLIANCE.md for compliant alternatives.\n"
+                "Set USER_JURISDICTION environment variable to override this check."
+            )
+
+        # Log warning even if not US (regulatory risk exists globally)
+        if not testnet:
+            logger.warning(
+                "⚠️ KuCoin Regulatory Risk: This exchange faces ongoing enforcement actions. "
+                "Review docs/EXCHANGE_COMPLIANCE.md before using. "
+                "Consider Binance or MEXC as safer alternatives."
+            )
+
         super().__init__(api_key, api_secret, testnet, rate_limit)
         self.passphrase = passphrase or os.getenv('KUCOIN_PASSPHRASE', '')
         self._api_version = "v1"
