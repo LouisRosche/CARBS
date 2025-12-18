@@ -49,6 +49,7 @@ Module Structure:
 - journal.py: TradeJournal
 - exporter.py: DataExporter
 - missouri_tax.py: MissouriTaxCalculator, MissouriFormGenerator, export_missouri_tax_package
+- form_1099_da.py: Form1099DA, Form1099DAReconciler, ReconciliationReport (for 2026+ tax years)
 - gdpr.py: GDPRCompliance
 - soc2.py: SOC2Controls
 """
@@ -62,6 +63,7 @@ from .cost_basis import CostBasisTracker
 from .journal import TradeJournal
 from .exporter import DataExporter
 from .missouri_tax import MissouriTaxCalculator, MissouriFormGenerator, export_missouri_tax_package
+from .form_1099_da import Form1099DA, Form1099DAReconciler, ReconciliationReport, ReconciliationDiscrepancy
 from .gdpr import GDPRCompliance
 from .soc2 import SOC2Controls
 
@@ -94,6 +96,9 @@ __all__ = [
     "TaxLot",
     "DispositionRecord",
     "TradeJournalEntry",
+    "Form1099DA",
+    "ReconciliationReport",
+    "ReconciliationDiscrepancy",
 
     # Classes
     "CostBasisTracker",
@@ -101,6 +106,7 @@ __all__ = [
     "DataExporter",
     "MissouriTaxCalculator",
     "MissouriFormGenerator",
+    "Form1099DAReconciler",
     "GDPRCompliance",
     "SOC2Controls",
 

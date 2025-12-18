@@ -140,7 +140,7 @@ class AuditLogger:
         self,
         log_dir: str = 'data/audit',
         max_file_size_mb: int = 100,
-        retention_days: int = 90
+        retention_days: int = 2555  # 7 years for IRS compliance
     ):
         """
         Initialize audit logger
@@ -148,7 +148,7 @@ class AuditLogger:
         Args:
             log_dir: Directory for audit logs
             max_file_size_mb: Max size before rotation
-            retention_days: Days to keep audit logs
+            retention_days: Days to keep audit logs (default 7 years for IRS requirements)
         """
         self.log_dir = Path(log_dir)
         self.log_dir.mkdir(parents=True, exist_ok=True)
