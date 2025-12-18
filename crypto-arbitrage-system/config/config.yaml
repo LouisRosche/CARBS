@@ -16,15 +16,15 @@ exchanges:
     taker_fee: 0.001  # 0.1%
     maker_fee: 0.001
     priority: 1
-  coinbase:
+  mexc:
     enabled: true
-    taker_fee: 0.006  # 0.6%
-    maker_fee: 0.004
+    taker_fee: 0.0020  # 0.2%
+    maker_fee: 0.0000  # 0% maker fees!
     priority: 2
-  kraken:
-    enabled: true
-    taker_fee: 0.0026  # 0.26%
-    maker_fee: 0.0016
+  kucoin:
+    enabled: false  # ⚠️ DISABLED: US persons prohibited (CFTC/FinCEN enforcement). See docs/EXCHANGE_COMPLIANCE.md
+    taker_fee: 0.001  # 0.1%
+    maker_fee: 0.001
     priority: 3
 
 symbols:
