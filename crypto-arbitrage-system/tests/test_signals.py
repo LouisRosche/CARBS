@@ -15,7 +15,7 @@ from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock, patch
 import json
 
-from signals import (
+from src.signals import (
     SentimentLevel,
     SignalType,
     NewsCategory,

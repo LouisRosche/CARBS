@@ -62,7 +62,7 @@ class MissouriTaxCalculator:
 
         Args:
             capital_gains: Total capital gains for the transaction
-            transaction_date: When the gain/loss was realized
+            transaction_date: When the gain/loss was realized (must be timezone-aware)
             filing_status: Tax filing status (for pre-exemption calculations)
 
         Returns:
@@ -71,7 +71,18 @@ class MissouriTaxCalculator:
             - exempt_amount: Amount exempt from MO tax
             - estimated_mo_tax: Missouri tax owed
             - notes: Explanation
+
+        Raises:
+            ValueError: If transaction_date is not timezone-aware
         """
+        # Validate timezone-aware datetime
+        if transaction_date.tzinfo is None or transaction_date.tzinfo.utcoffset(transaction_date) is None:
+            raise ValueError(
+                f"transaction_date must be timezone-aware. Got naive datetime: {transaction_date}. "
+                f"Use datetime.now(timezone.utc) or add tzinfo=timezone.utc. "
+                f"See docs/DEVELOPER_GUIDE.md for details."
+            )
+
         # After Aug 28, 2025: 100% exempt
         if transaction_date >= self.exemption_date:
             return {
@@ -106,12 +117,23 @@ class MissouriTaxCalculator:
         For 2025: Splits into pre-exemption and post-exemption periods
         For 2026+: All gains exempt
         For <2025: All gains taxable
+
+        Raises:
+            ValueError: If any disposition date is not timezone-aware
         """
         pre_exemption = Decimal("0")
         post_exemption = Decimal("0")
         total = Decimal("0")
 
         for disp in dispositions:
+            # Validate timezone-aware datetime
+            if (disp.disposition_date.tzinfo is None or
+                disp.disposition_date.tzinfo.utcoffset(disp.disposition_date) is None):
+                raise ValueError(
+                    f"disposition_date must be timezone-aware. Got naive datetime: {disp.disposition_date}. "
+                    f"Use datetime.now(timezone.utc) or add tzinfo=timezone.utc. "
+                    f"See docs/DEVELOPER_GUIDE.md for details."
+                )
             gain = disp.gain_loss
             total += gain
 

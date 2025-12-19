@@ -12,7 +12,7 @@ import pytest
 from decimal import Decimal
 from datetime import datetime, timezone
 
-from core.engine import OrderBook, Opportunity
+from src.core.engine import OrderBook, Opportunity
 
 
 @pytest.fixture

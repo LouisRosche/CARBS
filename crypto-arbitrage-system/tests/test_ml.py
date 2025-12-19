@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 import re
 
-from ml import (
+from src.ml import (
     SentimentResult,
     NewsEvent,
     BaseSentimentAnalyzer,
