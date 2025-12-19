@@ -15,7 +15,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 import tempfile
 
-from compliance import (
+from src.compliance import (
     CostBasisMethod,
     AssetClass,
     TaxJurisdiction,
