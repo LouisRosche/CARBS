@@ -4,7 +4,23 @@ Production-ready cryptocurrency arbitrage detection and execution platform.
 
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Production Ready](https://img.shields.io/badge/Production-Ready%20(95%25)-green.svg)](PRODUCTION_READINESS_REPORT.md)
 [![codecov](https://codecov.io/gh/LouisRosche/CARBS/branch/main/graph/badge.svg)](https://codecov.io/gh/LouisRosche/CARBS)
+
+---
+
+## 🚀 Quick Navigation
+
+**New to CARBS?** Choose your starting point:
+
+| Your Goal | Start Here | Time |
+|-----------|------------|------|
+| **First time here?** | 📍 **[START_HERE.md](START_HERE.md)** | 5 min |
+| **Ready to deploy?** | 📊 [PRODUCTION_READINESS_REPORT.md](PRODUCTION_READINESS_REPORT.md) | 20 min |
+| **Looking for specific docs?** | 📚 [DOCUMENTATION_HUB.md](DOCUMENTATION_HUB.md) | 10 min |
+| **Want to contribute?** | 💻 [docs/DEVELOPER_GUIDE.md](docs/DEVELOPER_GUIDE.md) | 1-2 hrs |
+
+**Current Status:** ✅ Production Ready - Grade A (95%)
 
 ---
 
