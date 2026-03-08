@@ -1,0 +1,68 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cd /home/user/CARBS/crypto-arbitrage-system && python -m flake8 src/ --max-line-length=120 --select=E,W --extend-ignore=E501 2>&1 | head -20 || true"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "matcher": ".*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cd /home/user/CARBS/crypto-arbitrage-system && python -m pytest tests/ -x -q --tb=short 2>&1 | tail -20 || true"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo '[CARBS Safety Check] Bash command intercepted. Ensure no live trading activation or secret exposure.' >&2"
+          }
+        ]
+      }
+    ]
+  },
+  "permissions": {
+    "allow": [
+      "Bash(make build)",
+      "Bash(make test)",
+      "Bash(make lint)",
+      "Bash(make format)",
+      "Bash(pytest*)",
+      "Bash(python -m pytest*)",
+      "Bash(python -m flake8*)",
+      "Bash(python -m mypy*)",
+      "Bash(black*)",
+      "Bash(isort*)",
+      "Bash(git status)",
+      "Bash(git diff*)",
+      "Bash(git log*)",
+      "Bash(git add*)",
+      "Bash(git commit*)",
+      "Bash(git push*)",
+      "Bash(git fetch*)",
+      "Bash(git checkout*)",
+      "Bash(git worktree*)",
+      "Read",
+      "Edit",
+      "Write",
+      "MultiEdit",
+      "Glob",
+      "Grep"
+    ]
+  },
+  "model": "claude-sonnet-4-6",
+  "cleanupPeriodDays": 30
+}

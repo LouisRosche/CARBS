@@ -1,0 +1,139 @@
+name: Claude Code Integration
+
+on:
+  issue_comment:
+    types: [created]
+  pull_request:
+    types: [opened, synchronize]
+  issues:
+    types: [opened, labeled]
+
+jobs:
+  # Automated code review on every PR
+  claude-review:
+    name: Claude Code Review
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Run Claude Code Review
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          prompt: |
+            /review
+
+            Review this pull request against CARBS standards defined in CLAUDE.md and AGENTS.md.
+            Focus on:
+            1. Trading safety (no live mode activation, circuit breakers intact)
+            2. Security (no credential exposure, SSL enforced, pydantic validation)
+            3. Code quality (async patterns, structlog, type hints)
+            4. Test coverage (mocked exchanges, no live API calls)
+
+            Post inline comments for each finding with file:line references.
+            Summarize with PASS / WARN / FAIL verdict.
+          claude_args: "--max-turns 5"
+
+  # Automated implementation on @claude mentions in issues
+  claude-implement:
+    name: Claude Issue Implementation
+    if: |
+      github.event_name == 'issue_comment' &&
+      contains(github.event.comment.body, '@claude') &&
+      github.event.comment.author_association == 'OWNER' ||
+      github.event.comment.author_association == 'MEMBER' ||
+      github.event.comment.author_association == 'COLLABORATOR'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Claude Implementation Agent
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          prompt: |
+            Implement the feature or fix described in the issue/comment.
+
+            CRITICAL CONSTRAINTS:
+            - Read CLAUDE.md and AGENTS.md first before making any changes
+            - Work only within crypto-arbitrage-system/ directory
+            - Never set trading mode to 'live' — paper trading only
+            - Run make lint and make test after changes
+            - If tests fail after 3 attempts, stop and report the error
+            - Open a PR when complete with a clear description
+          claude_args: "--max-turns 10"
+
+  # Scheduled documentation sync (runs weekly)
+  claude-sync-docs:
+    name: Documentation Sync
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 20
+
+      - name: Sync Documentation
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          prompt: |
+            /sync-docs
+
+            Review the last 20 commits and synchronize documentation with the current
+            codebase state. Open a PR with changes if any drift is detected.
+            Preserve all risk disclaimers and safety warnings unchanged.
+          claude_args: "--max-turns 8"
+
+  # Scheduled dependency audit (runs monthly)
+  claude-dep-audit:
+    name: Dependency Audit
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Generate dependency report
+        run: |
+          pip install safety pip-audit
+          safety check -r crypto-arbitrage-system/requirements.txt --json > safety-report.json 2>&1 || true
+          pip-audit -r crypto-arbitrage-system/requirements.txt --format json > audit-report.json 2>&1 || true
+
+      - name: Claude Dependency Update Agent
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          prompt: |
+            Read safety-report.json and audit-report.json.
+            For each vulnerable dependency:
+            1. Check the changelog for breaking changes
+            2. Update requirements.txt and pyproject.toml to the safe version
+            3. Refactor any code that uses changed APIs
+            4. Run make test to verify nothing broke
+            Open a PR with all safe upgrades. Do not upgrade if tests fail.
+          claude_args: "--max-turns 15"
