@@ -5,20 +5,25 @@ Core arbitrage detection, execution engine, and risk management. This is the mos
 safety-critical part of the codebase.
 
 ## Key Files
-- `arbitrage.py` — Spread detection, opportunity scoring (6-factor ML composite)
-- `execution.py` — Order placement with circuit breaker pattern
-- `risk.py` — Kelly Criterion sizing, VaR tracking, position limits
+- `engine.py` — `ArbitrageEngine`: spread detection, opportunity scoring. Data models: `Opportunity` and `OrderBook` (`@dataclass`)
+- `execution_engine.py` — `ExecutionEngine`: order placement with `CircuitBreaker` pattern (CLOSED/OPEN/HALF_OPEN states)
+- `risk_manager.py` — `RiskManager` + `KellyCriterion`: position sizing (cap: 10%), VaR, position limits
+- `advanced_engine.py` — `AdvancedArbitrageEngine`: multi-exchange engine with cointegration analysis
+- `triangle_arbitrage.py` — Triangle arbitrage path detection
+- `balance_manager.py` — Balance tracking and validation
+- `antifragile.py` — Antifragile trading strategies (Kelly cap: 25%)
+- `graceful_shutdown.py` — Async shutdown coordination
+- `state_manager.py` — Engine state persistence
 
 ## Invariants (DO NOT VIOLATE)
 - Circuit breaker state must be checked BEFORE every exchange API call
-- Kelly fraction must be ≤ 0.25 for any single position (hardcoded safety cap)
-- Slippage estimation (Almgren-Chriss) must run before order placement
+- Kelly fraction cap: 10% in `risk_manager.py`, 25% in `antifragile.py`
 - `min_spread_percent` from config must gate all opportunity detection
 
 ## Patterns
 - All execution functions are `async def`
-- Opportunity objects are pydantic v2 `BaseModel` instances
-- Log all trade decisions with structlog at INFO level
+- Data models use `@dataclass` (not pydantic)
+- Logging via standard `logging` module (`logger = logging.getLogger(__name__)`)
 - Log all circuit breaker state changes at WARNING level
 
 ## Testing This Module

@@ -1,12 +1,24 @@
 # src/exchanges — Exchange Adapter Module
 
 ## Purpose
-CCXT Pro WebSocket adapters for Binance, Coinbase, Kraken, OKX, and Bybit.
+CCXT Pro WebSocket adapters for **Binance, MEXC, and KuCoin**.
 Each adapter wraps raw CCXT calls with credential management and error handling.
 
+## Key Files
+- `base.py` — `BaseExchange`: abstract base class with credential storage (`SecureString`)
+- `binance.py` — Binance adapter
+- `mexc.py` — MEXC adapter
+- `kucoin.py` — KuCoin adapter (disabled for US users in config)
+- `manager.py` — Exchange lifecycle management
+- `rate_limiter.py` — Token bucket rate limiter
+- `websocket_manager.py` — WebSocket connection management
+- `models.py` — Exchange data models
+- `enums.py` — Exchange-related enumerations
+- `exceptions.py` — Custom exception types
+
 ## Patterns
-- Adapters inherit from a base class with circuit breaker integration
-- Credentials loaded via `src/utils/credentials.py` (Fernet-encrypted)
+- Adapters inherit from `BaseExchange` in `base.py`
+- Credentials loaded via `src/utils/secure_credentials.py` (Fernet-encrypted `SecureString`)
 - WebSocket connections use CCXT Pro's `watch_order_book` and `watch_ticker`
 - Reconnection logic uses exponential backoff (max 5 retries)
 
@@ -14,7 +26,6 @@ Each adapter wraps raw CCXT calls with credential management and error handling.
 - NEVER store API keys in adapter classes — always read from encrypted store
 - SSL verification MUST remain enabled on all connections
 - Rate limiting is per-exchange; respect CCXT's built-in rate limiter
-- Order book data cached in Redis with 1-second TTL — do not bypass
 
 ## Error Handling
 ```python

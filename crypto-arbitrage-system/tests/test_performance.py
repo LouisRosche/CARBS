@@ -30,7 +30,7 @@ END_TO_END_THRESHOLD = 0.100  # 100ms (total claim)
 @pytest.fixture
 def sample_orderbook():
     """Sample orderbook for benchmarking"""
-    from core.engine import OrderBook
+    from src.core.engine import OrderBook
 
     return OrderBook(
         exchange='binance',
@@ -56,7 +56,7 @@ def sample_orderbook():
 @pytest.fixture
 def multiple_orderbooks(sample_orderbook):
     """Multiple orderbooks from different exchanges"""
-    from core.engine import OrderBook
+    from src.core.engine import OrderBook
 
     orderbooks = {
         'binance': sample_orderbook,
@@ -226,7 +226,7 @@ class TestEndToEndPipeline:
         4. Filter for minimum profitability
         5. Create Opportunity objects
         """
-        from core.engine import Opportunity
+        from src.core.engine import Opportunity
 
         def end_to_end_detection():
             """Synchronous version for benchmark compatibility"""
@@ -320,7 +320,7 @@ class TestConcurrentProcessing:
                 await asyncio.sleep(0.001)  # 1ms simulated fetch
 
                 # Simulate processing
-                from core.engine import OrderBook
+                from src.core.engine import OrderBook
                 return OrderBook(
                     exchange=exchange_name,
                     symbol='BTC/USDT',
@@ -362,7 +362,7 @@ class TestMemoryEfficiency:
 
     def test_orderbook_memory_footprint(self, benchmark):
         """Verify orderbook objects don't accumulate excessive memory"""
-        from core.engine import OrderBook
+        from src.core.engine import OrderBook
 
         def create_orderbooks():
             """Create 1000 orderbook objects to test memory efficiency"""

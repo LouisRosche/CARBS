@@ -218,22 +218,8 @@ class TestConfidenceScore:
 
 
 class TestEngineIntegration:
-    """Integration tests for ArbitrageEngine"""
+    """Integration tests for ArbitrageEngine
 
-    @pytest.mark.asyncio
-    async def test_engine_initialization():
-        """Test engine can be initialized with mock config"""
-        # Would require mocking the config
-        pass
-
-    @pytest.mark.asyncio
-    async def test_find_arbitrage_no_opportunity():
-        """Should return None when no opportunity exists"""
-        # Would require full engine setup with mocked exchanges
-        pass
-
-    @pytest.mark.asyncio
-    async def test_find_arbitrage_with_opportunity():
-        """Should detect valid arbitrage opportunities"""
-        # Would require full engine setup with mocked exchanges
-        pass
+    TODO: These tests require mocking the full engine config and exchange
+    connections. Implement when ArbitrageEngine constructor is stabilized.
+    """

@@ -34,8 +34,8 @@ class TestNetworkFailures:
         2. Continue with other exchanges
         3. Not crash the entire system
         """
-        from core.engine import ArbitrageEngine
-        from config.settings import Config
+        from src.core.engine import ArbitrageEngine
+        from src.config.settings import Config
 
         # Mock config
         config = Mock(spec=Config)
@@ -82,8 +82,8 @@ class TestNetworkFailures:
         3. Retry with backoff
         4. Eventually alert operators
         """
-        from core.engine import ArbitrageEngine
-        from config.settings import Config
+        from src.core.engine import ArbitrageEngine
+        from src.config.settings import Config
 
         config = Mock(spec=Config)
         config.trading = Mock(min_spread_percent=0.3, max_spread_percent=5.0, max_position_usd=500)
@@ -223,7 +223,7 @@ class TestCacheFailures:
         2. Log warning
         3. Periodically retry connection
         """
-        from utils.cache import RedisCache
+        from src.utils.cache import RedisCache
 
         # Mock Redis connection failure
         with patch('redis.Redis.ping', side_effect=ConnectionError("Redis unreachable")):
@@ -338,7 +338,7 @@ class TestResourceExhaustion:
         Test that orderbook objects don't accumulate indefinitely
         This is a smoke test - real memory profiling requires memory_profiler
         """
-        from core.engine import OrderBook
+        from src.core.engine import OrderBook
 
         # Create many orderbooks
         orderbooks = []
@@ -423,7 +423,7 @@ class TestDataIntegrity:
         """
         Verify audit log integrity chain is maintained under failures
         """
-        from security.audit import AuditLogger, AuditCategory, AuditSeverity
+        from src.security.audit import AuditLogger, AuditCategory, AuditSeverity
 
         import tempfile
         import shutil
@@ -490,7 +490,7 @@ class TestGracefulDegradation:
         """
         Test circuit breaker pattern prevents cascade failures
         """
-        from core.execution_engine import CircuitBreaker
+        from src.core.execution_engine import CircuitBreaker
 
         # Circuit breaker should open after threshold failures
         circuit = CircuitBreaker(failure_threshold=3, timeout_seconds=60)
@@ -523,7 +523,7 @@ class TestConcurrencyIssues:
         """
         Test that concurrent orderbook updates don't cause race conditions
         """
-        from core.engine import OrderBook
+        from src.core.engine import OrderBook
 
         # Simulate rapid concurrent updates
         async def update_orderbook(orderbooks, exchange_name):
