@@ -116,14 +116,18 @@ RISK_BOUNDS = {
     "max_drawdown_percent": (1.0, 50.0),
     "position_limit_percent": (1.0, 100.0),
     "correlation_threshold": (0.0, 1.0),
-    "var_confidence": (0.9, 0.99)
+    "var_confidence": (0.9, 0.99),
+    "kelly_max_fraction": (0.01, 0.50),
+    "kelly_safety_factor": (0.01, 0.50),
 }
 
 DEFAULT_RISK_MANAGEMENT = {
     "max_drawdown_percent": 10.0,
     "position_limit_percent": 20.0,
     "correlation_threshold": 0.8,
-    "var_confidence": 0.95
+    "var_confidence": 0.95,
+    "kelly_max_fraction": 0.10,
+    "kelly_safety_factor": 0.25,
 }
 
 DEFAULT_LOGGING = {

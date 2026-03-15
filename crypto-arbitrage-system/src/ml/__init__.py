@@ -43,6 +43,7 @@ from .events import NewsEventDetector
 from .learner import StrategyLearner
 from .regime import RegimeDetector, Regime
 from .research import ResearchIngester
+from .analyzer import MLAnalyzer
 
 
 def create_sentiment_analyzer() -> BaseSentimentAnalyzer:
@@ -89,6 +90,9 @@ __all__ = [
     "RegimeDetector",
     "Regime",
     "ResearchIngester",
+
+    # Orchestrator
+    "MLAnalyzer",
 
     # Factory functions
     "create_sentiment_analyzer",

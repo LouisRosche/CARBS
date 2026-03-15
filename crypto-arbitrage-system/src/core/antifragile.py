@@ -105,7 +105,8 @@ class AntifragileCore:
         self,
         data_dir: Path = None,
         initial_capital: Decimal = Decimal("100"),
-        alert_callback: Callable = None
+        alert_callback: Callable = None,
+        kelly_max_fraction: float = 0.25
     ):
         self.data_dir = data_dir or Path("data/antifragile")
         self.data_dir.mkdir(parents=True, exist_ok=True)
@@ -113,6 +114,9 @@ class AntifragileCore:
         self.initial_capital = initial_capital
         self.current_capital = initial_capital
         self.alert_callback = alert_callback
+        self.kelly_max_fraction = kelly_max_fraction
+
+        logger.info(f"AntifragileCore kelly_max_fraction={self.kelly_max_fraction}")
 
         # System state
         self.state = SystemState.LEARNING
@@ -375,12 +379,12 @@ class AntifragileCore:
                 # Simplified Kelly: f = W - (1-W)/R where W=win rate, R=win/loss ratio
                 win_loss_ratio = float(perf.avg_win / perf.avg_loss) if perf.avg_loss > 0 else 1
                 kelly = perf.win_rate - (1 - perf.win_rate) / win_loss_ratio
-                kelly = max(0, min(0.25, kelly))  # Cap at 25%
+                kelly = max(0, min(self.kelly_max_fraction, kelly))  # Cap at configured max
                 adjusted_size = float(self.current_capital) * kelly
                 decision["reasons"].append(f"Kelly sizing: {kelly:.1%}")
 
-        # Cap at max position size
-        max_size = float(self.current_capital) * 0.25  # Never more than 25%
+        # Cap at max position size (configurable Kelly max fraction)
+        max_size = float(self.current_capital) * self.kelly_max_fraction
         adjusted_size = min(adjusted_size, max_size)
 
         # Calculate stops
@@ -714,13 +718,15 @@ class AntifragileCore:
 def create_antifragile_system(
     data_dir: Path = None,
     initial_capital: Decimal = Decimal("100"),
-    alert_callback: Callable = None
+    alert_callback: Callable = None,
+    kelly_max_fraction: float = 0.25
 ) -> AntifragileCore:
     """Factory function for creating anti-fragile system"""
     return AntifragileCore(
         data_dir=data_dir,
         initial_capital=initial_capital,
-        alert_callback=alert_callback
+        alert_callback=alert_callback,
+        kelly_max_fraction=kelly_max_fraction
     )
 
 

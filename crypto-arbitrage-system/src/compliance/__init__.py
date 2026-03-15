@@ -66,6 +66,7 @@ from .missouri_tax import MissouriTaxCalculator, MissouriFormGenerator, export_m
 from .form_1099_da import Form1099DA, Form1099DAReconciler, ReconciliationReport, ReconciliationDiscrepancy
 from .gdpr import GDPRCompliance
 from .soc2 import SOC2Controls
+from .manager import ComplianceManager
 
 
 def create_compliance_suite(data_dir: Path = None) -> dict:
@@ -109,6 +110,9 @@ __all__ = [
     "Form1099DAReconciler",
     "GDPRCompliance",
     "SOC2Controls",
+
+    # Orchestration
+    "ComplianceManager",
 
     # Functions
     "create_compliance_suite",

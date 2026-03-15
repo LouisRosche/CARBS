@@ -100,7 +100,8 @@ class KellyCriterion:
         win_probability: float,
         avg_win: Decimal,
         avg_loss: Decimal,
-        safety_factor: float = 0.25
+        safety_factor: float = 0.25,
+        max_fraction: float = 0.10
     ) -> Decimal:
         """
         Calculate optimal position size using Kelly Criterion
@@ -111,6 +112,7 @@ class KellyCriterion:
             avg_win: Average winning trade amount
             avg_loss: Average losing trade amount (positive number)
             safety_factor: Reduce Kelly by this factor (0.25 = quarter Kelly)
+            max_fraction: Maximum fraction of capital to risk (default 10%)
 
         Returns:
             Optimal position size in USD
@@ -137,9 +139,9 @@ class KellyCriterion:
         # Apply safety factor (typically 0.25 for quarter-Kelly)
         safe_kelly = kelly_fraction * safety
 
-        # Cap at reasonable maximum (e.g., 10% of capital)
-        max_fraction = Decimal('0.10')
-        safe_kelly = min(safe_kelly, max_fraction)
+        # Cap at configurable maximum fraction of capital
+        max_fraction_decimal = Decimal(str(max_fraction))
+        safe_kelly = min(safe_kelly, max_fraction_decimal)
 
         position_size = capital * safe_kelly
 
@@ -360,8 +362,15 @@ class RiskManager:
         self.max_daily_loss = Decimal(str(config.trading.max_daily_loss_usd))
         self.max_portfolio_risk_pct = 0.10  # Max 10% of capital at risk
 
-        # Kelly parameters
-        self.kelly_safety_factor = 0.25  # Quarter Kelly for safety
+        # Kelly parameters from config (with backwards-compatible defaults)
+        risk_cfg = getattr(config, 'risk_management', {}) or {}
+        self.kelly_max_fraction = float(risk_cfg.get('kelly_max_fraction', 0.10))
+        self.kelly_safety_factor = float(risk_cfg.get('kelly_safety_factor', 0.25))
+
+        logger.info(
+            f"Kelly parameters: max_fraction={self.kelly_max_fraction}, "
+            f"safety_factor={self.kelly_safety_factor}"
+        )
 
         # Performance tracking
         self.starting_capital = Decimal('10000')  # Default
@@ -426,7 +435,8 @@ class RiskManager:
             win_probability=win_prob,
             avg_win=avg_win,
             avg_loss=avg_loss,
-            safety_factor=self.kelly_safety_factor
+            safety_factor=self.kelly_safety_factor,
+            max_fraction=self.kelly_max_fraction
         )
 
         # Apply constraints
