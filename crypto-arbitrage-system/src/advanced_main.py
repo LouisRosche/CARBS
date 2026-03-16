@@ -24,8 +24,9 @@ from .core.advanced_engine import (
     EnhancedOrderBook,
     OpportunityScore
 )
-from .core.execution_engine import ExecutionEngine, TradeRecord as ExecTradeRecord
+from .core.execution_engine import ExecutionEngine
 from .core.risk_manager import RiskManager, TradeRecord
+from .core.balance_manager import BalanceManager, parse_symbol
 from .core.state_manager import StateManager, get_state_manager
 from .database.connection import DatabasePool
 from .utils.cache import RedisCache
@@ -103,6 +104,7 @@ class AdvancedArbitrageBot:
         self.advanced_engine = None
         self.execution_engine = None
         self.risk_manager = None
+        self.balance_manager = None
         self.state_manager = None
 
         # Optional integrated modules
@@ -179,9 +181,20 @@ class AdvancedArbitrageBot:
             except Exception as e:
                 logger.warning(f"⚠ Health server failed to start: {e}")
 
+        # Initialize balance manager for pre-trade validation
+        self.balance_manager = BalanceManager(
+            exchanges=self.exchanges,
+            refresh_interval=self.config.performance.get('balance_update_interval_seconds', 30),
+            stale_threshold=60
+        )
+        await self.balance_manager.start()
+        logger.info("✓ Balance manager initialized")
+
         # Initialize advanced components
         self.advanced_engine = AdvancedArbitrageEngine(self.config)
-        self.execution_engine = ExecutionEngine(self.config, self.exchanges)
+        self.execution_engine = ExecutionEngine(
+            self.config, self.exchanges, balance_manager=self.balance_manager
+        )
         self.risk_manager = RiskManager(self.config)
 
         # Initialize optional integrated modules
@@ -299,15 +312,21 @@ class AdvancedArbitrageBot:
         # Check cache
         cached = await self.cache.get(cache_key)
         if cached:
-            self.metrics.increment('orderbook_cache_hits')
-            # Reconstruct Decimal and datetime from cached strings
-            return EnhancedOrderBook(
-                exchange=cached['exchange'],
-                symbol=cached['symbol'],
-                timestamp=datetime.fromisoformat(cached['timestamp']),
-                bids=[(Decimal(p), Decimal(v)) for p, v in cached['bids']],
-                asks=[(Decimal(p), Decimal(v)) for p, v in cached['asks']]
-            )
+            # Staleness guard: reject cached data older than 5 seconds
+            cached_time = datetime.fromisoformat(cached['timestamp'])
+            age_seconds = (datetime.now(timezone.utc) - cached_time).total_seconds()
+            if age_seconds > 5.0:
+                logger.debug(f"Rejecting stale cached orderbook for {exchange_name}:{symbol} ({age_seconds:.1f}s old)")
+                self.metrics.increment('orderbook_stale_rejects')
+            else:
+                self.metrics.increment('orderbook_cache_hits')
+                return EnhancedOrderBook(
+                    exchange=cached['exchange'],
+                    symbol=cached['symbol'],
+                    timestamp=cached_time,
+                    bids=[(Decimal(p), Decimal(v)) for p, v in cached['bids']],
+                    asks=[(Decimal(p), Decimal(v)) for p, v in cached['asks']]
+                )
 
         try:
             exchange = self.exchanges[exchange_name]
@@ -941,6 +960,11 @@ class AdvancedArbitrageBot:
                 )
             except Exception as e:
                 logger.warning(f"Notification error: {e}")
+
+        # Stop balance manager
+        if self.balance_manager:
+            await self.balance_manager.stop()
+            logger.info("✓ Balance manager stopped")
 
         # Close exchange connections
         for exchange in self.exchanges.values():

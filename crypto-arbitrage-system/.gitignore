@@ -19,3 +19,9 @@ build/
 .DS_Store
 data/logs/
 data/historical/
+data/state/
+backups/
+
+# Binary archives
+*.tar.gz
+*.zip

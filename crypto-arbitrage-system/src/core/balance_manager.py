@@ -253,19 +253,35 @@ class BalanceManager:
             # Fetch balances from exchange API — with circuit breaker if available
             breaker = self.circuit_breakers.get(exchange_name)
             if breaker and hasattr(breaker, 'execute'):
-                raw_balances = await breaker.execute(exchange.get_balances)
+                raw_balances = await breaker.execute(exchange.fetch_balance)
+            elif hasattr(exchange, 'fetch_balance'):
+                # ccxt.pro exchange — use fetch_balance
+                raw_balances = await exchange.fetch_balance()
             else:
+                # Custom BaseExchange — use get_balances
                 raw_balances = await exchange.get_balances()
             now = datetime.now(timezone.utc)
 
             async with self._lock:
-                # Update balance snapshots
+                # Handle ccxt.pro format: {asset: {free: x, used: y, total: z}}
+                # vs BaseExchange format: {asset: Balance(free=x, locked=y)}
                 for asset, balance in raw_balances.items():
+                    # Skip non-asset keys in ccxt response
+                    if asset in ('info', 'free', 'used', 'total', 'timestamp', 'datetime'):
+                        continue
+                    if isinstance(balance, dict):
+                        free = Decimal(str(balance.get('free', 0) or 0))
+                        locked = Decimal(str(balance.get('used', 0) or 0))
+                    else:
+                        free = balance.free if hasattr(balance, 'free') else Decimal('0')
+                        locked = balance.locked if hasattr(balance, 'locked') else Decimal('0')
+                    if free == 0 and locked == 0:
+                        continue
                     exchange_balances.balances[asset] = BalanceSnapshot(
                         exchange=exchange_name,
                         asset=asset,
-                        free=balance.free,
-                        locked=balance.locked,
+                        free=free,
+                        locked=locked,
                         timestamp=now
                     )
 
