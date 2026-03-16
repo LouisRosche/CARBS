@@ -32,7 +32,7 @@ class TestPasswordHashing:
 
     def test_hash_password_generates_unique_hashes(self):
         """Each hash should be unique due to random salt"""
-        from security.encryption import hash_password
+        from src.security.encryption import hash_password
 
         hash1, salt1 = hash_password("password123")
         hash2, salt2 = hash_password("password123")
@@ -42,7 +42,7 @@ class TestPasswordHashing:
 
     def test_verify_password_correct(self):
         """Correct password should verify"""
-        from security.encryption import hash_password, verify_password
+        from src.security.encryption import hash_password, verify_password
 
         password = "secure_password_123"
         password_hash, salt = hash_password(password)
@@ -51,7 +51,7 @@ class TestPasswordHashing:
 
     def test_verify_password_incorrect(self):
         """Incorrect password should not verify"""
-        from security.encryption import hash_password, verify_password
+        from src.security.encryption import hash_password, verify_password
 
         password_hash, salt = hash_password("correct_password")
 
@@ -59,7 +59,7 @@ class TestPasswordHashing:
 
     def test_hash_password_with_provided_salt(self):
         """Should use provided salt if given"""
-        from security.encryption import hash_password
+        from src.security.encryption import hash_password
 
         salt = b'0' * 32
         hash1, returned_salt1 = hash_password("password", salt)
@@ -86,7 +86,7 @@ class TestSecretsManager:
 
     def test_secrets_manager_requires_master_key(self):
         """Should raise error without master key"""
-        from security.encryption import SecretsManager, EncryptionError
+        from src.security.encryption import SecretsManager, EncryptionError
 
         with patch.dict(os.environ, {'CARBS_MASTER_KEY': ''}, clear=False):
             # Remove the key temporarily
@@ -100,7 +100,7 @@ class TestSecretsManager:
 
     def test_set_and_get_secret(self, temp_data_dir):
         """Should store and retrieve secrets"""
-        from security.encryption import SecretsManager
+        from src.security.encryption import SecretsManager
 
         manager = SecretsManager("test_password")
         manager.set_secret("api_key", "secret_value_123")
@@ -109,7 +109,7 @@ class TestSecretsManager:
 
     def test_get_nonexistent_secret_returns_default(self, temp_data_dir):
         """Should return default for missing secrets"""
-        from security.encryption import SecretsManager
+        from src.security.encryption import SecretsManager
 
         manager = SecretsManager("test_password")
 
@@ -118,7 +118,7 @@ class TestSecretsManager:
 
     def test_delete_secret(self, temp_data_dir):
         """Should delete secrets"""
-        from security.encryption import SecretsManager
+        from src.security.encryption import SecretsManager
 
         manager = SecretsManager("test_password")
         manager.set_secret("to_delete", "value")
@@ -128,7 +128,7 @@ class TestSecretsManager:
 
     def test_list_secrets(self, temp_data_dir):
         """Should list all secret keys"""
-        from security.encryption import SecretsManager
+        from src.security.encryption import SecretsManager
 
         manager = SecretsManager("test_password")
         manager.set_secret("key1", "value1")
@@ -140,7 +140,7 @@ class TestSecretsManager:
 
     def test_encrypt_decrypt_value(self, temp_data_dir):
         """Should encrypt and decrypt values correctly"""
-        from security.encryption import SecretsManager
+        from src.security.encryption import SecretsManager
 
         manager = SecretsManager("test_password")
         original = "sensitive_data"
@@ -157,7 +157,7 @@ class TestEnvironmentSecretsProvider:
 
     def test_get_secret_from_env(self):
         """Should read secrets from environment variables"""
-        from security.encryption import EnvironmentSecretsProvider
+        from src.security.encryption import EnvironmentSecretsProvider
 
         provider = EnvironmentSecretsProvider(prefix="TEST_SECRET_")
 
@@ -166,7 +166,7 @@ class TestEnvironmentSecretsProvider:
 
     def test_get_secret_with_default(self):
         """Should return default when env var not set"""
-        from security.encryption import EnvironmentSecretsProvider
+        from src.security.encryption import EnvironmentSecretsProvider
 
         provider = EnvironmentSecretsProvider(prefix="TEST_SECRET_")
 
@@ -174,7 +174,7 @@ class TestEnvironmentSecretsProvider:
 
     def test_list_secrets(self):
         """Should list secrets from environment"""
-        from security.encryption import EnvironmentSecretsProvider
+        from src.security.encryption import EnvironmentSecretsProvider
 
         provider = EnvironmentSecretsProvider(prefix="LIST_TEST_")
 
@@ -194,7 +194,7 @@ class TestUnifiedSecretsManager:
 
     def test_fallback_chain(self):
         """Should try providers in order until secret found"""
-        from security.encryption import UnifiedSecretsManager, EnvironmentSecretsProvider
+        from src.security.encryption import UnifiedSecretsManager, EnvironmentSecretsProvider
 
         manager = UnifiedSecretsManager()
 
@@ -207,7 +207,7 @@ class TestUnifiedSecretsManager:
 
     def test_returns_default_when_not_found(self):
         """Should return default when no provider has the secret"""
-        from security.encryption import UnifiedSecretsManager, EnvironmentSecretsProvider
+        from src.security.encryption import UnifiedSecretsManager, EnvironmentSecretsProvider
 
         manager = UnifiedSecretsManager()
         manager.add_provider(EnvironmentSecretsProvider(prefix="EMPTY_"))
@@ -220,7 +220,7 @@ class TestRateLimiter:
 
     def test_allows_requests_within_limit(self):
         """Should allow requests within rate limits"""
-        from api.middleware import RateLimiter, RateLimitConfig
+        from src.api.middleware import RateLimiter, RateLimitConfig
 
         config = RateLimitConfig(
             requests_per_minute=10,
@@ -236,7 +236,7 @@ class TestRateLimiter:
 
     def test_blocks_burst_limit(self):
         """Should block requests exceeding burst limit"""
-        from api.middleware import RateLimiter, RateLimitConfig
+        from src.api.middleware import RateLimiter, RateLimitConfig
 
         config = RateLimitConfig(burst_limit=2)
         limiter = RateLimiter(config)
@@ -252,7 +252,7 @@ class TestRateLimiter:
 
     def test_different_keys_independent(self):
         """Different IPs should have independent limits"""
-        from api.middleware import RateLimiter, RateLimitConfig
+        from src.api.middleware import RateLimiter, RateLimitConfig
 
         config = RateLimitConfig(burst_limit=1)
         limiter = RateLimiter(config)
@@ -273,7 +273,7 @@ class TestUserRateLimiter:
 
     def test_user_rate_limiting(self):
         """Should rate limit per user"""
-        from api.middleware import UserRateLimiter
+        from src.api.middleware import UserRateLimiter
 
         limiter = UserRateLimiter()
 
@@ -287,7 +287,7 @@ class TestUserRateLimiter:
 
     def test_sensitive_endpoints_stricter(self):
         """Sensitive endpoints should have stricter limits"""
-        from api.middleware import UserRateLimiter
+        from src.api.middleware import UserRateLimiter
 
         limiter = UserRateLimiter()
 
@@ -304,7 +304,7 @@ class TestConfigValidation:
 
     def test_validate_bounds_valid_values(self):
         """Should accept values within bounds"""
-        from config.settings import validate_bounds
+        from src.config.settings import validate_bounds
 
         data = {"check_interval_seconds": 5}
         bounds = {"check_interval_seconds": (1, 60)}
@@ -314,7 +314,7 @@ class TestConfigValidation:
 
     def test_validate_bounds_invalid_value(self):
         """Should reject values outside bounds"""
-        from config.settings import validate_bounds, ConfigValidationError
+        from src.config.settings import validate_bounds, ConfigValidationError
 
         data = {"check_interval_seconds": 0}
         bounds = {"check_interval_seconds": (1, 60)}
@@ -324,7 +324,7 @@ class TestConfigValidation:
 
     def test_validate_path_safe_valid(self):
         """Should accept safe paths"""
-        from config.settings import validate_path_safe
+        from src.config.settings import validate_path_safe
 
         # Should not raise
         validate_path_safe("logs/app.log", "test")
@@ -332,7 +332,7 @@ class TestConfigValidation:
 
     def test_validate_path_safe_traversal(self):
         """Should reject path traversal attempts"""
-        from config.settings import validate_path_safe, ConfigValidationError
+        from src.config.settings import validate_path_safe, ConfigValidationError
 
         with pytest.raises(ConfigValidationError):
             validate_path_safe("../../../etc/passwd", "test")
@@ -351,7 +351,7 @@ class TestApprovalWorkflow:
     @pytest.mark.asyncio
     async def test_create_and_approve_request(self, temp_approval_dir):
         """Should create and approve requests"""
-        from security.approval_workflow import (
+        from src.security.approval_workflow import (
             ApprovalWorkflowEngine, ApprovalType, ApprovalStatus
         )
         from pathlib import Path
@@ -382,7 +382,7 @@ class TestApprovalWorkflow:
     @pytest.mark.asyncio
     async def test_reject_request(self, temp_approval_dir):
         """Should reject requests"""
-        from security.approval_workflow import (
+        from src.security.approval_workflow import (
             ApprovalWorkflowEngine, ApprovalType, ApprovalStatus
         )
         from pathlib import Path
@@ -410,7 +410,7 @@ class TestApprovalWorkflow:
     @pytest.mark.asyncio
     async def test_concurrent_approval_safety(self, temp_approval_dir):
         """Should handle concurrent approvals safely"""
-        from security.approval_workflow import (
+        from src.security.approval_workflow import (
             ApprovalWorkflowEngine, ApprovalType
         )
         from pathlib import Path
@@ -449,7 +449,7 @@ class TestApprovalWorkflow:
     @pytest.mark.asyncio
     async def test_cleanup_expired_requests(self, temp_approval_dir):
         """Should cleanup expired requests safely"""
-        from security.approval_workflow import (
+        from src.security.approval_workflow import (
             ApprovalWorkflowEngine, ApprovalType, ApprovalStatus
         )
         from pathlib import Path
@@ -478,7 +478,7 @@ class TestSecureToken:
 
     def test_generate_secure_token_length(self):
         """Should generate tokens of correct length"""
-        from security.encryption import generate_secure_token
+        from src.security.encryption import generate_secure_token
 
         token = generate_secure_token(32)
         # URL-safe base64 encoding adds some overhead
@@ -486,7 +486,7 @@ class TestSecureToken:
 
     def test_generate_secure_token_unique(self):
         """Tokens should be unique"""
-        from security.encryption import generate_secure_token
+        from src.security.encryption import generate_secure_token
 
         tokens = [generate_secure_token() for _ in range(100)]
         assert len(set(tokens)) == 100
@@ -497,7 +497,7 @@ class TestTrustedProxyValidator:
 
     def test_is_trusted_proxy_localhost(self):
         """Should trust localhost"""
-        from api.middleware import TrustedProxyValidator
+        from src.api.middleware import TrustedProxyValidator
 
         validator = TrustedProxyValidator()
         assert validator.is_trusted_proxy('127.0.0.1') is True
@@ -505,7 +505,7 @@ class TestTrustedProxyValidator:
 
     def test_is_trusted_proxy_private_network(self):
         """Should trust private networks by default"""
-        from api.middleware import TrustedProxyValidator
+        from src.api.middleware import TrustedProxyValidator
 
         validator = TrustedProxyValidator()
         assert validator.is_trusted_proxy('10.0.0.1') is True
@@ -514,7 +514,7 @@ class TestTrustedProxyValidator:
 
     def test_is_trusted_proxy_public_ip(self):
         """Should not trust public IPs"""
-        from api.middleware import TrustedProxyValidator
+        from src.api.middleware import TrustedProxyValidator
 
         validator = TrustedProxyValidator()
         assert validator.is_trusted_proxy('8.8.8.8') is False
@@ -522,7 +522,7 @@ class TestTrustedProxyValidator:
 
     def test_get_real_client_ip_direct_connection(self):
         """Should use direct IP when not from trusted proxy"""
-        from api.middleware import TrustedProxyValidator
+        from src.api.middleware import TrustedProxyValidator
 
         validator = TrustedProxyValidator()
         # Direct connection from public IP - ignore X-Forwarded-For
@@ -534,7 +534,7 @@ class TestTrustedProxyValidator:
 
     def test_get_real_client_ip_from_proxy(self):
         """Should extract client IP from X-Forwarded-For when from proxy"""
-        from api.middleware import TrustedProxyValidator
+        from src.api.middleware import TrustedProxyValidator
 
         validator = TrustedProxyValidator()
         # Connection from trusted proxy - use X-Forwarded-For
@@ -546,7 +546,7 @@ class TestTrustedProxyValidator:
 
     def test_get_real_client_ip_rightmost_untrusted(self):
         """Should use rightmost untrusted IP"""
-        from api.middleware import TrustedProxyValidator
+        from src.api.middleware import TrustedProxyValidator
 
         validator = TrustedProxyValidator()
         # Multiple proxies in chain
@@ -559,7 +559,7 @@ class TestTrustedProxyValidator:
 
     def test_get_real_client_ip_invalid_ip(self):
         """Should handle invalid IPs gracefully"""
-        from api.middleware import TrustedProxyValidator
+        from src.api.middleware import TrustedProxyValidator
 
         validator = TrustedProxyValidator()
         result = validator.get_real_client_ip(
@@ -575,7 +575,7 @@ class TestRequestSigner:
 
     def test_sign_request_generates_headers(self):
         """Should generate signature headers"""
-        from api.middleware import RequestSigner
+        from src.api.middleware import RequestSigner
 
         signer = RequestSigner(secret_key='test_secret')
         headers = signer.sign_request('POST', '/api/v1/trade', b'{"amount": 100}')
@@ -586,7 +586,7 @@ class TestRequestSigner:
 
     def test_verify_request_valid_signature(self):
         """Should verify valid signatures"""
-        from api.middleware import RequestSigner
+        from src.api.middleware import RequestSigner
 
         signer = RequestSigner(secret_key='test_secret')
 
@@ -609,7 +609,7 @@ class TestRequestSigner:
 
     def test_verify_request_invalid_signature(self):
         """Should reject invalid signatures"""
-        from api.middleware import RequestSigner
+        from src.api.middleware import RequestSigner
 
         signer = RequestSigner(secret_key='test_secret')
 
@@ -627,7 +627,7 @@ class TestRequestSigner:
 
     def test_verify_request_replay_protection(self):
         """Should reject replayed requests"""
-        from api.middleware import RequestSigner
+        from src.api.middleware import RequestSigner
 
         signer = RequestSigner(secret_key='test_secret')
 
@@ -655,7 +655,7 @@ class TestRequestSigner:
 
     def test_verify_request_expired(self):
         """Should reject old requests"""
-        from api.middleware import RequestSigner
+        from src.api.middleware import RequestSigner
 
         signer = RequestSigner(secret_key='test_secret')
 
@@ -687,7 +687,7 @@ class TestApprovalWorkflowRaceCondition:
     @pytest.mark.asyncio
     async def test_executing_status_prevents_double_execution(self, temp_approval_dir):
         """Should prevent concurrent execution with EXECUTING status"""
-        from security.approval_workflow import (
+        from src.security.approval_workflow import (
             ApprovalWorkflowEngine, ApprovalType, ApprovalStatus
         )
         from pathlib import Path
@@ -736,7 +736,7 @@ class TestApprovalWorkflowRaceCondition:
     @pytest.mark.asyncio
     async def test_executing_status_in_enum(self):
         """EXECUTING status should exist in ApprovalStatus"""
-        from security.approval_workflow import ApprovalStatus
+        from src.security.approval_workflow import ApprovalStatus
 
         assert hasattr(ApprovalStatus, 'EXECUTING')
         assert ApprovalStatus.EXECUTING.value == 'executing'
@@ -744,7 +744,7 @@ class TestApprovalWorkflowRaceCondition:
     @pytest.mark.asyncio
     async def test_failed_execution_reverts_to_approved(self, temp_approval_dir):
         """Failed execution should revert status to APPROVED"""
-        from security.approval_workflow import (
+        from src.security.approval_workflow import (
             ApprovalWorkflowEngine, ApprovalType, ApprovalStatus
         )
         from pathlib import Path
@@ -786,7 +786,7 @@ class TestSecurityMiddleware:
 
     def test_middleware_has_proxy_validator(self):
         """SecurityMiddleware should have proxy validator"""
-        from api.middleware import SecurityMiddleware
+        from src.api.middleware import SecurityMiddleware
 
         middleware = SecurityMiddleware()
         assert hasattr(middleware, 'proxy_validator')
@@ -794,7 +794,7 @@ class TestSecurityMiddleware:
 
     def test_middleware_has_request_signer(self):
         """SecurityMiddleware should have request signer"""
-        from api.middleware import SecurityMiddleware
+        from src.api.middleware import SecurityMiddleware
 
         middleware = SecurityMiddleware()
         assert hasattr(middleware, 'request_signer')
@@ -802,7 +802,7 @@ class TestSecurityMiddleware:
 
     def test_get_client_ip_method(self):
         """Should have get_client_ip method"""
-        from api.middleware import SecurityMiddleware
+        from src.api.middleware import SecurityMiddleware
 
         middleware = SecurityMiddleware()
 
@@ -816,7 +816,7 @@ class TestSecurityMiddleware:
 
     def test_verify_request_signature_method(self):
         """Should have verify_request_signature method"""
-        from api.middleware import SecurityMiddleware, RequestSigner
+        from src.api.middleware import SecurityMiddleware, RequestSigner
 
         middleware = SecurityMiddleware(require_signed_requests=True)
 
@@ -835,7 +835,7 @@ class TestAuditLogging:
 
     def test_audit_logger_has_new_methods(self):
         """Should have new audit logging methods"""
-        from security.audit import AuditLogger
+        from src.security.audit import AuditLogger
 
         # Check methods exist
         assert hasattr(AuditLogger, 'log_token_revocation')

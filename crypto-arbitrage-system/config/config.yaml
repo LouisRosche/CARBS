@@ -52,6 +52,8 @@ risk_management:
   max_position_percent: 50  # % of available balance
   require_both_balances: true  # Must have balance on both exchanges
   min_balance_usd: 50
+  kelly_max_fraction: 0.10        # Maximum Kelly fraction (default 10%)
+  kelly_safety_factor: 0.25       # Safety factor applied to raw Kelly (quarter-Kelly)
 
 logging:
   level: INFO  # DEBUG | INFO | WARNING | ERROR | CRITICAL

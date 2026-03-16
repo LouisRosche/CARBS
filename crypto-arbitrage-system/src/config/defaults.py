@@ -299,6 +299,10 @@ class RiskDefaults:
     DEFAULT_LEVERAGE: float = 1.0
     MAX_LEVERAGE: float = 3.0
 
+    # Kelly Criterion
+    KELLY_MAX_FRACTION: float = 0.10  # Maximum Kelly fraction (10% of capital)
+    KELLY_SAFETY_FACTOR: float = 0.25  # Safety factor applied to raw Kelly (quarter-Kelly)
+
 
 RISK = RiskDefaults()
 
@@ -457,6 +461,8 @@ def get_all_defaults() -> Dict[str, Any]:
             'max_drawdown_percent': RISK.MAX_DRAWDOWN_PERCENT,
             'position_limit_percent': RISK.POSITION_LIMIT_PERCENT,
             'var_confidence': RISK.VAR_CONFIDENCE,
+            'kelly_max_fraction': RISK.KELLY_MAX_FRACTION,
+            'kelly_safety_factor': RISK.KELLY_SAFETY_FACTOR,
         },
         'logging': {
             'level': LOGGING.LEVEL,

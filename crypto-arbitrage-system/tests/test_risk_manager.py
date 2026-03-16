@@ -26,7 +26,7 @@ class TestKellyCriterion:
 
     def test_position_size_basic(self):
         """Test basic position size calculation"""
-        from core.risk_manager import KellyCriterion
+        from src.core.risk_manager import KellyCriterion
 
         capital = Decimal('10000')
         win_probability = 0.6
@@ -42,7 +42,7 @@ class TestKellyCriterion:
 
     def test_position_size_zero_loss(self):
         """Should return 0 if avg_loss is 0"""
-        from core.risk_manager import KellyCriterion
+        from src.core.risk_manager import KellyCriterion
 
         size = KellyCriterion.calculate_position_size(
             capital=Decimal('10000'),
@@ -55,7 +55,7 @@ class TestKellyCriterion:
 
     def test_position_size_edge_probability(self):
         """Should return 0 for edge probability values"""
-        from core.risk_manager import KellyCriterion
+        from src.core.risk_manager import KellyCriterion
 
         # Probability of 0
         size1 = KellyCriterion.calculate_position_size(
@@ -77,7 +77,7 @@ class TestKellyCriterion:
 
     def test_position_size_negative_expectation(self):
         """Should return 0 for negative expected value"""
-        from core.risk_manager import KellyCriterion
+        from src.core.risk_manager import KellyCriterion
 
         # Low win rate with small wins vs large losses
         size = KellyCriterion.calculate_position_size(
@@ -91,7 +91,7 @@ class TestKellyCriterion:
 
     def test_position_size_safety_factor(self):
         """Safety factor should reduce position size"""
-        from core.risk_manager import KellyCriterion
+        from src.core.risk_manager import KellyCriterion
 
         base_size = KellyCriterion.calculate_position_size(
             capital=Decimal('10000'),
@@ -114,7 +114,7 @@ class TestKellyCriterion:
 
     def test_position_size_decimal_precision(self):
         """Should maintain decimal precision throughout calculation"""
-        from core.risk_manager import KellyCriterion
+        from src.core.risk_manager import KellyCriterion
 
         size = KellyCriterion.calculate_position_size(
             capital=Decimal('10000.123456'),
@@ -128,7 +128,7 @@ class TestKellyCriterion:
 
     def test_calculate_win_probability(self):
         """Test win probability calculation from trade history"""
-        from core.risk_manager import KellyCriterion
+        from src.core.risk_manager import KellyCriterion
 
         trades = [
             MockTradeRecord("1", Decimal('100'), datetime.now(timezone.utc)),
@@ -144,14 +144,14 @@ class TestKellyCriterion:
 
     def test_calculate_win_probability_no_trades(self):
         """Should return 0.5 for empty trade history"""
-        from core.risk_manager import KellyCriterion
+        from src.core.risk_manager import KellyCriterion
 
         prob = KellyCriterion.calculate_win_probability([])
         assert prob == 0.5
 
     def test_calculate_avg_win_loss(self):
         """Test average win/loss calculation"""
-        from core.risk_manager import KellyCriterion
+        from src.core.risk_manager import KellyCriterion
 
         trades = [
             MockTradeRecord("1", Decimal('100'), datetime.now(timezone.utc)),
@@ -171,7 +171,7 @@ class TestRiskMetrics:
 
     def test_var_calculation(self):
         """Test Value at Risk calculation"""
-        from core.risk_manager import RiskMetrics
+        from src.core.risk_manager import RiskMetrics
 
         returns = [
             Decimal('-0.02'),
@@ -193,7 +193,7 @@ class TestRiskMetrics:
 
     def test_max_drawdown(self):
         """Test maximum drawdown calculation"""
-        from core.risk_manager import RiskMetrics
+        from src.core.risk_manager import RiskMetrics
 
         equity_curve = [
             Decimal('10000'),
@@ -212,7 +212,7 @@ class TestRiskMetrics:
 
     def test_sharpe_ratio(self):
         """Test Sharpe ratio calculation"""
-        from core.risk_manager import RiskMetrics
+        from src.core.risk_manager import RiskMetrics
 
         returns = [
             Decimal('0.01'),
@@ -232,7 +232,7 @@ class TestRiskMetrics:
 
     def test_sortino_ratio(self):
         """Test Sortino ratio calculation"""
-        from core.risk_manager import RiskMetrics
+        from src.core.risk_manager import RiskMetrics
 
         returns = [
             Decimal('0.01'),
@@ -256,7 +256,7 @@ class TestRiskManager:
 
     def test_check_daily_loss_limit(self):
         """Test daily loss limit checking"""
-        from core.risk_manager import RiskManager
+        from src.core.risk_manager import RiskManager
 
         manager = RiskManager(
             daily_loss_limit=Decimal('100'),
@@ -278,7 +278,7 @@ class TestRiskManager:
 
     def test_position_limit_check(self):
         """Test position size limit"""
-        from core.risk_manager import RiskManager
+        from src.core.risk_manager import RiskManager
 
         manager = RiskManager(
             daily_loss_limit=Decimal('1000'),
@@ -292,7 +292,7 @@ class TestRiskManager:
 
     def test_risk_reset_on_new_day(self):
         """Daily limits should reset on new day"""
-        from core.risk_manager import RiskManager
+        from src.core.risk_manager import RiskManager
 
         manager = RiskManager(
             daily_loss_limit=Decimal('100'),

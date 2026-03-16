@@ -14,9 +14,9 @@ Crypto Arbitrage Bot System (Python 3.11+). Paper-trading default; live trading 
 /                           ← Root: docs, CLAUDE.md, AGENTS.md
 /crypto-arbitrage-system/   ← Main Python package (work here)
   src/core/                 ← Arbitrage engine, execution, risk management
-  src/exchanges/            ← CCXT Pro adapters (Binance, Coinbase, Kraken, OKX, Bybit)
+  src/exchanges/            ← CCXT Pro adapters (Binance, MEXC, KuCoin)
   src/api/                  ← FastAPI health/metrics endpoints
-  src/database/             ← TimescaleDB models via asyncpg
+  src/database/             ← PostgreSQL models via asyncpg
   src/utils/                ← Credentials (Fernet), cache (Redis), metrics (Prometheus)
   tests/                    ← pytest test suite
   config/config.yaml        ← Runtime config (trading mode, exchanges, symbols)
@@ -35,16 +35,15 @@ make format         # black + isort (line-length=120)
 ## Code Conventions
 - **Python style**: black (120 chars), isort, type hints required for public functions
 - **Async**: All exchange I/O is async (asyncio + ccxt.pro); use `async def` throughout
-- **Logging**: structlog only — never use `print()` in src/
-- **Validation**: pydantic v2 models for all external data boundaries
+- **Logging**: standard `logging` module — never use `print()` in src/
+- **Data models**: `@dataclass` for internal data structures; pydantic v2 for external API boundaries
 - **Tests**: pytest-asyncio, `asyncio_mode = "auto"`; mock exchanges, never call live APIs in tests
-- **Secrets**: Fernet encryption via `src/utils/credentials.py` — never plaintext
+- **Secrets**: Fernet encryption via `src/utils/secure_credentials.py` — never plaintext
 
 ## Architecture Invariants
-- Circuit breaker wraps all exchange calls — do NOT remove
-- Kelly Criterion position sizing is mandatory for live trades
-- Redis orderbook TTL is 1 second — do not increase
-- Health endpoints (`/health/live`, `/health/ready`) must remain functional
+- Circuit breaker in `execution_engine.py` wraps exchange calls — do NOT remove
+- Kelly Criterion position sizing is mandatory for live trades (cap: 10% in risk_manager, 25% in antifragile)
+- Health endpoints (`/live`, `/ready`, `/health`) must remain functional
 
 ## Anti-Patterns to Avoid
 - Do NOT add synchronous blocking calls inside async functions

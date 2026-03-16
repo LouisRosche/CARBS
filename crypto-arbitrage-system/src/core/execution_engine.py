@@ -837,8 +837,9 @@ class ExecutionEngine:
             order_side = OrderSide.BUY if side.lower() == 'buy' else OrderSide.SELL
 
             try:
-                # Submit order to exchange
-                exchange_order = await exchange.create_order(
+                # Submit order to exchange — wrapped with circuit breaker
+                protected_create = breaker.call(exchange.create_order)
+                exchange_order = await protected_create(
                     symbol=exchange_symbol,
                     side=order_side,
                     order_type=OrderType.LIMIT,
@@ -861,7 +862,7 @@ class ExecutionEngine:
 
                 # Wait for fill (with timeout)
                 if order.status not in [OrderStatus.FILLED, OrderStatus.FAILED, OrderStatus.CANCELLED]:
-                    order = await self._wait_for_fill(exchange, exchange_symbol, order)
+                    order = await self._wait_for_fill(exchange, exchange_symbol, order, exchange_name=exchange_name)
 
                 return order
 
@@ -907,7 +908,8 @@ class ExecutionEngine:
         exchange,
         symbol: str,
         order: OrderState,
-        timeout_seconds: int = None
+        timeout_seconds: int = None,
+        exchange_name: str = ""
     ) -> OrderState:
         """
         Wait for order to fill with polling.
@@ -927,10 +929,17 @@ class ExecutionEngine:
 
         logger.debug(f"Waiting for order {order.order_id} to fill (timeout={timeout}s)")
 
+        # Get circuit breaker for this exchange (if available)
+        breaker = self.circuit_breakers.get(exchange_name) if exchange_name else None
+
         while time.time() - start < timeout:
             try:
-                # Query order status from exchange
-                exchange_order = await exchange.get_order(symbol, order.order_id)
+                # Query order status from exchange — with circuit breaker if available
+                if breaker:
+                    protected_get = breaker.call(exchange.get_order)
+                    exchange_order = await protected_get(symbol, order.order_id)
+                else:
+                    exchange_order = await exchange.get_order(symbol, order.order_id)
 
                 order.status = self._map_exchange_status(exchange_order.status)
                 order.filled_amount = exchange_order.filled_quantity
@@ -964,9 +973,13 @@ class ExecutionEngine:
         order.error_message = f"Order timeout after {timeout}s"
         logger.warning(f"Order {order.order_id} timed out after {timeout}s")
 
-        # Try to cancel the unfilled order
+        # Try to cancel the unfilled order — with circuit breaker if available
         try:
-            cancelled = await exchange.cancel_order(symbol, order.order_id)
+            if breaker:
+                protected_cancel = breaker.call(exchange.cancel_order)
+                cancelled = await protected_cancel(symbol, order.order_id)
+            else:
+                cancelled = await exchange.cancel_order(symbol, order.order_id)
             if cancelled:
                 order.status = OrderStatus.CANCELLED
                 logger.info(f"Cancelled timed-out order {order.order_id}")

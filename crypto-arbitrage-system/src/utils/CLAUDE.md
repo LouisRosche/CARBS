@@ -4,20 +4,23 @@
 Shared utilities: encrypted credential management, Redis caching, Prometheus metrics.
 
 ## Key Files
-- `credentials.py` — Fernet symmetric encryption for API key storage in memory
-- `cache.py` — Redis client wrapper with TTL enforcement
-- `metrics.py` — Prometheus Counter/Gauge/Histogram registration
+- `secure_credentials.py` — `SecureCredentialStore` (Fernet encryption, PBKDF2 key derivation, 100k iterations) and `SecureString` (per-value encrypted wrapper)
+- `cache.py` — `RedisCache` (async Redis client with TLS support, retry logic), `TokenBlacklist`, `SessionStore`
+- `metrics.py` — `MetricsCollector` (basic Prometheus Counter/Gauge/Histogram registration)
+- `error_handling.py` — Centralized error handling utilities
+- `resilience.py` — Resilience patterns (retry, backoff)
 
 ## Security Rules (CRITICAL)
-- `credentials.py`: The Fernet key is derived at runtime from env vars — NEVER hardcode it
+- `secure_credentials.py`: The Fernet key is derived at runtime from env vars — NEVER hardcode it
 - Credentials are stored encrypted in memory; decrypted only at point of use
-- NEVER log decrypted credentials — structlog must redact sensitive fields
-- Use `SecretStr` from pydantic for any credential-bearing fields
+- NEVER log decrypted credentials — logging must redact sensitive fields
 
 ## Cache Rules
-- Redis TTL for order book data: **exactly 1 second** — do not modify
-- All cache keys must be namespaced: `carbs:<exchange>:<symbol>:<data_type>`
-- Cache misses must be logged at DEBUG level, never silently ignored
+- `RedisCache` accepts TTL as a parameter on `set()` calls — callers are responsible for passing correct TTL
+- Order book data callers should use `ttl=1` (1 second)
+- All cache keys should be namespaced: `carbs:<exchange>:<symbol>:<data_type>`
+- `TokenBlacklist` uses key prefix `carbs:token:blacklist`
+- `SessionStore` uses key prefix `carbs:session:` and `carbs:user_sessions:`
 
 ## Metrics Registration
 ```python
@@ -29,4 +32,4 @@ ARBITRAGE_OPPORTUNITIES = Counter(
 )
 ```
 - Do not create duplicate metric names — check `metrics.py` before adding new ones
-- All metrics must include relevant labels for Grafana filtering
+- Note: `health.py` contains an extended `PrometheusMetrics` class with 25+ additional metrics

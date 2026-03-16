@@ -134,7 +134,8 @@ class BalanceManager:
         refresh_interval: int = None,
         reserve_ratio: Decimal = None,
         lock_timeout: int = None,
-        stale_threshold: int = None
+        stale_threshold: int = None,
+        circuit_breakers: Optional[Dict] = None
     ):
         """
         Initialize BalanceManager.
@@ -145,8 +146,10 @@ class BalanceManager:
             reserve_ratio: Fraction of balance to hold in reserve (0.0 - 1.0)
             lock_timeout: How long balance locks last (seconds)
             stale_threshold: How old before balance is considered stale (seconds)
+            circuit_breakers: Optional dict of exchange name -> CircuitBreaker instance
         """
         self.exchanges = exchanges
+        self.circuit_breakers = circuit_breakers or {}
         self.refresh_interval = refresh_interval or self.DEFAULT_REFRESH_INTERVAL
         self.reserve_ratio = reserve_ratio or self.DEFAULT_RESERVE_RATIO
         self.lock_timeout = lock_timeout or self.DEFAULT_LOCK_TIMEOUT
@@ -247,8 +250,12 @@ class BalanceManager:
         exchange_balances.update_in_progress = True
 
         try:
-            # Fetch balances from exchange API
-            raw_balances = await exchange.get_balances()
+            # Fetch balances from exchange API — with circuit breaker if available
+            breaker = self.circuit_breakers.get(exchange_name)
+            if breaker and hasattr(breaker, 'execute'):
+                raw_balances = await breaker.execute(exchange.get_balances)
+            else:
+                raw_balances = await exchange.get_balances()
             now = datetime.now(timezone.utc)
 
             async with self._lock:

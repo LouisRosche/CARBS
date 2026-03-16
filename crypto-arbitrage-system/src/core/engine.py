@@ -19,6 +19,7 @@ import ccxt.pro as ccxtpro
 from database.connection import DatabasePool
 from utils.cache import RedisCache
 from utils.metrics import MetricsCollector
+from utils.resilience import CircuitBreaker as ResilienceCircuitBreaker, CircuitBreakerConfig, CircuitBreakerOpenError
 from config.settings import Config
 
 logger = logging.getLogger(__name__)
@@ -141,6 +142,9 @@ class ArbitrageEngine:
         self.max_spread = Decimal(str(config.trading.max_spread_percent)) / 100
         self.max_position_usd = Decimal(str(config.trading.max_position_usd))
         
+        # Circuit breakers per exchange
+        self.circuit_breakers: Dict[str, ResilienceCircuitBreaker] = {}
+
         # Performance tracking
         self.opportunities_found = 0
         self.orderbooks_processed = 0
@@ -187,6 +191,16 @@ class ArbitrageEngine:
                 # Test connection
                 await exchange.load_markets()
                 self.exchanges[exchange_name] = exchange
+
+                # Initialize circuit breaker for this exchange
+                self.circuit_breakers[exchange_name] = ResilienceCircuitBreaker(
+                    name=f"engine_{exchange_name}",
+                    config=CircuitBreakerConfig(
+                        failure_threshold=5,
+                        success_threshold=2,
+                        timeout_seconds=60.0,
+                    )
+                )
                 logger.info(f"✓ Connected to {exchange_name}")
                 
             except Exception as e:
@@ -232,7 +246,11 @@ class ArbitrageEngine:
         
         try:
             exchange = self.exchanges[exchange_name]
-            ob_data = await exchange.watch_order_book(symbol)
+            breaker = self.circuit_breakers.get(exchange_name)
+            if breaker:
+                ob_data = await breaker.execute(exchange.watch_order_book, symbol)
+            else:
+                ob_data = await exchange.watch_order_book(symbol)
             
             orderbook = OrderBook(
                 exchange=exchange_name,
