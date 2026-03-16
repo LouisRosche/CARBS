@@ -11,7 +11,7 @@ logger = logging.getLogger(__name__)
 
 # Import state manager for real data
 try:
-    from core.state_manager import StateManager, get_state_manager
+    from ..core.state_manager import StateManager, get_state_manager
     STATE_MANAGER_AVAILABLE = True
 except ImportError:
     STATE_MANAGER_AVAILABLE = False

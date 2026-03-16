@@ -28,15 +28,15 @@ try:
 except ImportError:
     FASTAPI_AVAILABLE = False
 
-from security.auth import AuthenticationManager, AuthError, TokenError
-from security.access_control import AccessControl, Permission, EmergencyControls
-from security.audit import get_audit_logger, AuditCategory
-from security.encryption import SecretsManager
+from ..security.auth import AuthenticationManager, AuthError, TokenError
+from ..security.access_control import AccessControl, Permission, EmergencyControls
+from ..security.audit import get_audit_logger, AuditCategory
+from ..security.encryption import SecretsManager
 from .middleware import SecurityMiddleware, RateLimiter
 
 # Import state manager for real-time data
 try:
-    from core.state_manager import StateManager, get_state_manager
+    from ..core.state_manager import StateManager, get_state_manager
     STATE_MANAGER_AVAILABLE = True
 except ImportError:
     STATE_MANAGER_AVAILABLE = False

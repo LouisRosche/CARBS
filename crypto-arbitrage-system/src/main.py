@@ -35,7 +35,7 @@ def main():
     )
 
     # Import and run advanced_main
-    from advanced_main import main as advanced_main
+    from .advanced_main import main as advanced_main
     import asyncio
 
     asyncio.run(advanced_main())

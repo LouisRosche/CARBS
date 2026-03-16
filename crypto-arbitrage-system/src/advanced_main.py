@@ -19,53 +19,53 @@ from datetime import datetime, timezone
 
 import ccxt.pro as ccxtpro
 
-from core.advanced_engine import (
+from .core.advanced_engine import (
     AdvancedArbitrageEngine,
     EnhancedOrderBook,
     OpportunityScore
 )
-from core.execution_engine import ExecutionEngine, TradeRecord as ExecTradeRecord
-from core.risk_manager import RiskManager, TradeRecord
-from core.state_manager import StateManager, get_state_manager
-from database.connection import DatabasePool
-from utils.cache import RedisCache
-from utils.metrics import MetricsCollector
-from config.settings import load_config, ConfigLoadError, ConfigValidationError
+from .core.execution_engine import ExecutionEngine, TradeRecord as ExecTradeRecord
+from .core.risk_manager import RiskManager, TradeRecord
+from .core.state_manager import StateManager, get_state_manager
+from .database.connection import DatabasePool
+from .utils.cache import RedisCache
+from .utils.metrics import MetricsCollector
+from .config.settings import load_config, ConfigLoadError, ConfigValidationError
 
 # Import health server
 try:
-    from api.health_server import HealthServer
+    from .api.health_server import HealthServer
     HEALTH_SERVER_AVAILABLE = True
 except ImportError:
     HEALTH_SERVER_AVAILABLE = False
 
 # Import optional modules with graceful fallbacks
 try:
-    from core.antifragile import AntifragileCore
+    from .core.antifragile import AntifragileCore
     ANTIFRAGILE_AVAILABLE = True
 except ImportError:
     ANTIFRAGILE_AVAILABLE = False
 
 try:
-    from signals import SignalManager, SentimentAggregator
+    from .signals import SignalManager, SentimentAggregator
     SIGNALS_AVAILABLE = True
 except ImportError:
     SIGNALS_AVAILABLE = False
 
 try:
-    from ml import MLAnalyzer
+    from .ml import MLAnalyzer
     ML_ANALYZER_AVAILABLE = True
 except ImportError:
     ML_ANALYZER_AVAILABLE = False
 
 try:
-    from notifications import NotificationManager
+    from .notifications import NotificationManager
     NOTIFICATIONS_AVAILABLE = True
 except ImportError:
     NOTIFICATIONS_AVAILABLE = False
 
 try:
-    from compliance import ComplianceManager
+    from .compliance import ComplianceManager
     COMPLIANCE_AVAILABLE = True
 except ImportError:
     COMPLIANCE_AVAILABLE = False

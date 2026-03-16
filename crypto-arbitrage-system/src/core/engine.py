@@ -16,11 +16,11 @@ import logging
 
 import ccxt.pro as ccxtpro
 
-from database.connection import DatabasePool
-from utils.cache import RedisCache
-from utils.metrics import MetricsCollector
-from utils.resilience import CircuitBreaker as ResilienceCircuitBreaker, CircuitBreakerConfig, CircuitBreakerOpenError
-from config.settings import Config
+from ..database.connection import DatabasePool
+from ..utils.cache import RedisCache
+from ..utils.metrics import MetricsCollector
+from ..utils.resilience import CircuitBreaker as ResilienceCircuitBreaker, CircuitBreakerConfig, CircuitBreakerOpenError
+from ..config.settings import Config
 
 logger = logging.getLogger(__name__)
 
