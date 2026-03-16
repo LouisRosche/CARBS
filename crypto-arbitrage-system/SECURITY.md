@@ -2,33 +2,27 @@
 
 ## Supported Versions
 
-| Version | Supported          |
-| ------- | ------------------ |
-| 1.0.x   | :white_check_mark: |
+| Version | Supported |
+|---------|-----------|
+| 1.0.x   | Yes       |
+
+---
 
 ## Reporting a Vulnerability
 
-We take security vulnerabilities seriously. If you discover a security issue, please report it responsibly.
+**DO NOT create a public GitHub issue for security vulnerabilities.**
 
-### How to Report
+1. Email security concerns to the project maintainers
+2. Include: description, steps to reproduce, potential impact, suggested fixes (optional)
 
-1. **DO NOT** create a public GitHub issue for security vulnerabilities
-2. Email security concerns to the project maintainers
-3. Include the following information:
-   - Description of the vulnerability
-   - Steps to reproduce
-   - Potential impact
-   - Any suggested fixes (optional)
+### Response Times
 
-### What to Expect
-
-- **Acknowledgment**: Within 48 hours
-- **Initial Assessment**: Within 7 days
-- **Resolution Timeline**: Depends on severity
-  - Critical: 24-72 hours
-  - High: 1-2 weeks
-  - Medium: 2-4 weeks
-  - Low: Next release cycle
+| Severity | Acknowledgment | Resolution |
+|----------|---------------|------------|
+| Critical | 48 hours | 24-72 hours |
+| High | 48 hours | 1-2 weeks |
+| Medium | 48 hours | 2-4 weeks |
+| Low | 48 hours | Next release cycle |
 
 ### Severity Classification
 
@@ -39,110 +33,139 @@ We take security vulnerabilities seriously. If you discover a security issue, pl
 | Medium | Limited impact | Information disclosure, limited access |
 | Low | Minimal impact | Minor information leaks, hardening issues |
 
-## Security Best Practices
+---
 
-### API Credentials
+## API Key Setup
 
-- **Never** commit API keys or secrets to version control
-- Use environment variables or encrypted storage
-- The `.env` file should **never** be committed (check `.gitignore`)
-- Rotate API keys regularly
-- Use read-only API keys when possible
+### Security Rules
 
-### Configuration
+1. **Never commit API keys to git** -- `.env` is gitignored
+2. **Use environment variables only** -- never `config/config.yaml`
+3. **Enable IP whitelisting** on all exchanges
+4. **Restrict permissions** -- trade + read only, no withdrawals
+5. **Rotate keys regularly**
+
+### Binance
+
+1. Log into Binance -> API Management
+2. Create new API key
+3. Enable "Enable Spot & Margin Trading"
+4. **Disable** "Enable Withdrawals"
+5. Add your server IP to whitelist
+6. Copy key and secret to `.env`
+
+### Coinbase
+
+1. Log into Coinbase Pro -> API settings
+2. Create API key with "Trade" permission only
+3. Copy credentials to `.env`
+
+### Kraken
+
+1. Log into Kraken -> Settings -> API
+2. Generate new key
+3. Enable "Query Funds" and "Create & Modify Orders"
+4. **Disable** "Withdraw Funds"
+5. Copy to `.env`
+
+### Master Encryption Key
 
 ```bash
-# Set master encryption key securely
-export CARBS_MASTER_KEY=$(python -c "import secrets; print(secrets.token_urlsafe(32))")
+# Generate master key
+python -c "import secrets; print(secrets.token_urlsafe(32))"
+
+# Set in .env
+CARBS_MASTER_KEY=<generated-key>
 
 # Protect .env file
 chmod 600 .env
 ```
 
-### Access Control
+---
 
-- Use role-based access control (RBAC)
-- Enable 2FA for all admin accounts
-- Review audit logs regularly
-- Implement principle of least privilege
+## Built-in Security Features
 
-### Network Security
-
-- Always use HTTPS/WSS for exchange connections
-- Configure firewall rules to limit exposure
-- Use VPN for production deployments
-- Enable SSL verification (never disable in production)
-
-### Database Security
-
-- Use strong, unique passwords
-- Enable encryption at rest
-- Limit network access to database
-- Regular backups with encryption
-
-## Security Features
-
-### Built-in Protections
-
-- **Encryption**: Fernet encryption for stored credentials
-- **Rate Limiting**: Protection against brute force attacks
-- **Audit Logging**: Comprehensive trail of all operations
-- **Circuit Breaker**: Automatic halt on anomalies
-- **Emergency Stop**: One-click trading halt
-
-### Authentication
-
-- Password hashing with SHA-256
-- TOTP-based 2FA support
-- Session management with expiration
-- Failed login attempt tracking
+| Feature | Description |
+|---------|-------------|
+| Fernet Encryption | All stored credentials encrypted via `src/utils/secure_credentials.py` |
+| Rate Limiting | Protection against brute force and API abuse |
+| Audit Logging | Comprehensive trail of all operations |
+| Circuit Breaker | Automatic halt on exchange anomalies |
+| Emergency Stop | One-click trading halt |
+| Password Hashing | SHA-256 with TOTP-based 2FA support |
+| Session Management | Expiration and failed login tracking |
 
 ### Data Protection
 
-- Sensitive data encrypted at rest
+- Sensitive data encrypted at rest (Fernet)
 - No plaintext credential storage
 - Secure secret rotation support
 - GDPR-compliant data handling
 
-## Security Checklist for Deployment
+---
 
-- [ ] All API keys stored securely (not in code)
-- [ ] Master encryption key set via environment
+## Security Best Practices
+
+### Network
+
+- Always use HTTPS/WSS for exchange connections
+- Configure firewall rules to limit exposure
+- Use VPN for production deployments
+- Never disable SSL verification in production
+
+### Database
+
+- Use strong, unique passwords
+- Enable encryption at rest
+- Limit network access to database
+- Regular encrypted backups
+
+### Access Control
+
+- Enable 2FA for all admin and exchange accounts
+- Review audit logs regularly
+- Implement principle of least privilege
+- Use IP whitelisting on all exchange APIs
+
+### Trading Safety
+
+- Set conservative position limits
+- Enable daily loss limits
+- Test in paper mode first (2+ weeks recommended)
+- Monitor for unusual activity
+
+---
+
+## Deployment Security Checklist
+
+- [ ] All API keys stored in `.env` (not in code or config.yaml)
+- [ ] Master encryption key set (`CARBS_MASTER_KEY`)
+- [ ] `.env` file permissions set (`chmod 600`)
 - [ ] SSL certificates configured
 - [ ] Database credentials secured
 - [ ] Firewall rules configured
-- [ ] 2FA enabled for all admin accounts
+- [ ] 2FA enabled on all exchange accounts
 - [ ] Audit logging enabled
 - [ ] Emergency stop tested
 - [ ] Backup encryption enabled
 - [ ] Network segmentation in place
+- [ ] IP whitelisting enabled on exchanges
+- [ ] Withdrawal permissions disabled on API keys
 
-## Known Security Considerations
-
-### Exchange API Keys
-
-- Grant minimum required permissions
-- Use IP whitelisting when available
-- Set withdrawal restrictions
-- Monitor for unauthorized access
-
-### Trading Risks
-
-- Set conservative position limits
-- Enable daily loss limits
-- Test in paper mode first
-- Monitor for unusual activity
+---
 
 ## Compliance
 
-CARBS includes features to support:
+CARBS includes features supporting:
 
 - SOX 404 compliance framework
-- GAAP financial reporting
-- Tax reporting (Form 8949, 1099-B)
+- GAAP financial reporting (ASC 606, 820, 825)
+- Tax reporting (Form 8949, Schedule D, 1099-DA)
 - AML/KYC integration hooks
 - Audit trail requirements
 
-## Contact
+See [COMPLIANCE.md](COMPLIANCE.md) for details.
 
-For security-related inquiries, please contact the project maintainers through appropriate channels.
+---
+
+For security-related inquiries, contact the project maintainers through appropriate channels.
