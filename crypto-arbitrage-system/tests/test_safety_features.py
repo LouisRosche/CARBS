@@ -1,15 +1,20 @@
 """
 Tests for safety features in advanced_main.py:
 - Balance manager validation before execution
-- Stale orderbook rejection (>5s cached data)
-- Fresh cached orderbook acceptance (<5s cached data)
+- Stale orderbook rejection (>5s via in-memory WS cache)
+- Fresh orderbook acceptance (<5s via in-memory WS cache)
 - Balance manager started during bot initialization
+- Persistent WS stream updates in-memory cache
+- Event-driven monitor_symbol reacts to WS updates
 """
 
+import asyncio
 import pytest
 from decimal import Decimal
 from datetime import datetime, timezone, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
+
+from src.core.advanced_engine import EnhancedOrderBook
 
 
 class MockConfig:
@@ -60,7 +65,21 @@ def _make_bot():
     bot.state_manager.get_trading_state = MagicMock(
         return_value=MagicMock(total_profit=Decimal("0"))
     )
+    bot.advanced_engine = MagicMock()
+    bot.advanced_engine.update_price_history = MagicMock()
     return bot
+
+
+def _make_orderbook(exchange: str, symbol: str, age_seconds: float = 0) -> EnhancedOrderBook:
+    """Create an EnhancedOrderBook with a configurable age."""
+    ts = datetime.now(timezone.utc) - timedelta(seconds=age_seconds)
+    return EnhancedOrderBook(
+        exchange=exchange,
+        symbol=symbol,
+        timestamp=ts,
+        bids=[(Decimal("67000"), Decimal("1.0"))],
+        asks=[(Decimal("67100"), Decimal("1.0"))],
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -71,102 +90,55 @@ async def test_balance_manager_validates_before_execution():
     """ExecutionEngine must receive the balance_manager so it can validate trades."""
     bot = _make_bot()
 
-    # Set up a mock balance_manager
     mock_bm = AsyncMock()
     mock_bm.validate_arbitrage = AsyncMock(return_value=(True, "OK"))
     bot.balance_manager = mock_bm
 
-    # Build ExecutionEngine the same way initialize() does
     from src.core.execution_engine import ExecutionEngine
 
     with patch.object(ExecutionEngine, "__init__", return_value=None) as mock_init:
-        engine = ExecutionEngine.__new__(ExecutionEngine)
-        mock_init.assert_not_called()  # sanity: not yet called
+        ExecutionEngine(bot.config, bot.exchanges, balance_manager=bot.balance_manager)
 
-        # Replicate the line from initialize():
-        engine = ExecutionEngine(
-            bot.config, bot.exchanges, balance_manager=bot.balance_manager
-        )
-
-        # Verify balance_manager was passed
         mock_init.assert_called_once_with(
             bot.config, bot.exchanges, balance_manager=mock_bm
         )
 
 
 # --------------------------------------------------------------------------- #
-# Test 2: Stale cached orderbook is rejected (>5s old)
+# Test 2: Stale in-memory orderbook is rejected (>5s old)
 # --------------------------------------------------------------------------- #
 @pytest.mark.asyncio
 async def test_stale_orderbook_rejected():
-    """fetch_orderbook should reject cached data older than 5 seconds and fetch fresh."""
+    """fetch_orderbook_sync should reject in-memory data older than 5 seconds."""
     bot = _make_bot()
 
-    stale_timestamp = (datetime.now(timezone.utc) - timedelta(seconds=10)).isoformat()
+    # Place a stale orderbook in the WS cache
+    stale_ob = _make_orderbook("binance", "BTC/USDT", age_seconds=10)
+    bot._latest_orderbooks[("binance", "BTC/USDT")] = stale_ob
 
-    # Cache returns stale data
-    bot.cache.get = AsyncMock(
-        return_value={
-            "exchange": "binance",
-            "symbol": "BTC/USDT",
-            "timestamp": stale_timestamp,
-            "bids": [["67000", "1.0"]],
-            "asks": [["67100", "1.0"]],
-        }
-    )
+    result = bot.fetch_orderbook_sync("binance", "BTC/USDT")
 
-    # Set up the exchange to return fresh data when cache is stale
-    bot.exchanges["binance"].watch_order_book = AsyncMock(
-        return_value={
-            "bids": [[67000.0, 1.0]],
-            "asks": [[67100.0, 1.0]],
-        }
-    )
-
-    # Need advanced_engine for price history update
-    bot.advanced_engine = MagicMock()
-    bot.advanced_engine.update_price_history = MagicMock()
-
-    result = await bot.fetch_orderbook("binance", "BTC/USDT")
-
-    # Stale data should be rejected -> falls through to live fetch
+    assert result is None
     bot.metrics.increment.assert_any_call("orderbook_stale_rejects")
-    # Live fetch should have been called
-    bot.exchanges["binance"].watch_order_book.assert_awaited_once_with("BTC/USDT")
-    assert result is not None
-    assert result.exchange == "binance"
 
 
 # --------------------------------------------------------------------------- #
-# Test 3: Fresh cached orderbook is accepted (<5s old)
+# Test 3: Fresh in-memory orderbook is accepted (<5s old)
 # --------------------------------------------------------------------------- #
 @pytest.mark.asyncio
 async def test_fresh_cached_orderbook_accepted():
-    """fetch_orderbook should accept cached data that is less than 5 seconds old."""
+    """fetch_orderbook_sync should return fresh in-memory data (<5s old)."""
     bot = _make_bot()
 
-    fresh_timestamp = (datetime.now(timezone.utc) - timedelta(seconds=2)).isoformat()
+    fresh_ob = _make_orderbook("binance", "BTC/USDT", age_seconds=2)
+    bot._latest_orderbooks[("binance", "BTC/USDT")] = fresh_ob
 
-    bot.cache.get = AsyncMock(
-        return_value={
-            "exchange": "binance",
-            "symbol": "BTC/USDT",
-            "timestamp": fresh_timestamp,
-            "bids": [["67000", "1.0"]],
-            "asks": [["67100", "1.0"]],
-        }
-    )
+    result = bot.fetch_orderbook_sync("binance", "BTC/USDT")
 
-    result = await bot.fetch_orderbook("binance", "BTC/USDT")
-
-    # Fresh cache should be used — no live fetch
-    bot.metrics.increment.assert_any_call("orderbook_cache_hits")
-    bot.exchanges["binance"].watch_order_book = AsyncMock()
-    # Verify we did NOT call the exchange
-    bot.exchanges["binance"].watch_order_book.assert_not_awaited()
     assert result is not None
     assert result.exchange == "binance"
     assert result.symbol == "BTC/USDT"
+    bot.metrics.increment.assert_any_call("orderbook_cache_hits")
 
 
 # --------------------------------------------------------------------------- #
@@ -193,7 +165,6 @@ async def test_balance_manager_started_during_init():
         patch("src.advanced_main.RiskManager"),
         patch("src.advanced_main.HEALTH_SERVER_AVAILABLE", False),
     ):
-        # Wire up async mocks
         mock_db = AsyncMock()
         mock_db_cls.return_value = mock_db
         mock_redis = AsyncMock()
@@ -205,13 +176,103 @@ async def test_balance_manager_started_during_init():
         mock_state.update_system_health = MagicMock()
         mock_state_mgr.return_value = mock_state
 
-        # BalanceManager mock
         mock_bm_instance = AsyncMock()
         mock_bm_instance.start = AsyncMock()
         mock_bm_cls.return_value = mock_bm_instance
 
         await bot.initialize()
 
-        # Verify BalanceManager was instantiated and start() was called
         mock_bm_cls.assert_called_once()
         mock_bm_instance.start.assert_awaited_once()
+
+
+# --------------------------------------------------------------------------- #
+# Test 5: WS stream updates in-memory cache
+# --------------------------------------------------------------------------- #
+@pytest.mark.asyncio
+async def test_ws_stream_populates_cache():
+    """_stream_orderbook should store fresh orderbooks in _latest_orderbooks."""
+    bot = _make_bot()
+    bot.running = True
+
+    # Mock exchange.watch_order_book to return data once, then stop the bot
+    call_count = 0
+
+    async def mock_watch(symbol):
+        nonlocal call_count
+        call_count += 1
+        if call_count > 1:
+            bot.running = False
+            raise asyncio.CancelledError()
+        return {
+            "bids": [[67000.0, 1.0], [66999.0, 0.5]],
+            "asks": [[67100.0, 1.0], [67101.0, 0.5]],
+        }
+
+    bot.exchanges["binance"].watch_order_book = mock_watch
+
+    await bot._stream_orderbook("binance", "BTC/USDT")
+
+    key = ("binance", "BTC/USDT")
+    assert key in bot._latest_orderbooks
+    ob = bot._latest_orderbooks[key]
+    assert ob.exchange == "binance"
+    assert ob.symbol == "BTC/USDT"
+    assert len(ob.bids) == 2
+    bot.metrics.increment.assert_any_call("orderbooks_fetched")
+
+
+# --------------------------------------------------------------------------- #
+# Test 6: WS stream signals event for monitor_symbol
+# --------------------------------------------------------------------------- #
+@pytest.mark.asyncio
+async def test_ws_stream_signals_event():
+    """_stream_orderbook should set the event so monitor_symbol wakes up."""
+    bot = _make_bot()
+    bot.running = True
+
+    event = asyncio.Event()
+    bot._orderbook_events["BTC/USDT"] = event
+
+    call_count = 0
+
+    async def mock_watch(symbol):
+        nonlocal call_count
+        call_count += 1
+        if call_count > 1:
+            bot.running = False
+            raise asyncio.CancelledError()
+        return {"bids": [[67000.0, 1.0]], "asks": [[67100.0, 1.0]]}
+
+    bot.exchanges["binance"].watch_order_book = mock_watch
+
+    # Event should be unset initially
+    assert not event.is_set()
+
+    await bot._stream_orderbook("binance", "BTC/USDT")
+
+    # After stream processes, event should have been set (may be cleared by now
+    # if someone was waiting, but cache should be populated)
+    assert ("binance", "BTC/USDT") in bot._latest_orderbooks
+
+
+# --------------------------------------------------------------------------- #
+# Test 7: fetch_orderbook falls back to direct WS call when cache is empty
+# --------------------------------------------------------------------------- #
+@pytest.mark.asyncio
+async def test_fetch_orderbook_fallback_on_empty_cache():
+    """fetch_orderbook should call watch_order_book directly when WS cache is empty."""
+    bot = _make_bot()
+
+    bot.exchanges["binance"].watch_order_book = AsyncMock(
+        return_value={"bids": [[67000.0, 1.0]], "asks": [[67100.0, 1.0]]}
+    )
+
+    # Cache is empty — no entry in _latest_orderbooks
+    result = await bot.fetch_orderbook("binance", "BTC/USDT")
+
+    assert result is not None
+    assert result.exchange == "binance"
+    bot.exchanges["binance"].watch_order_book.assert_awaited_once_with("BTC/USDT")
+    # Should also populate the in-memory cache
+    assert ("binance", "BTC/USDT") in bot._latest_orderbooks

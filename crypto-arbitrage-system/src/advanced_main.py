@@ -121,6 +121,11 @@ class AdvancedArbitrageBot:
         self.running = False
         self.shutdown_event = asyncio.Event()
 
+        # Persistent WebSocket orderbook cache: {(exchange, symbol): EnhancedOrderBook}
+        self._latest_orderbooks = {}
+        # Event fired when any orderbook updates for a given symbol: {symbol: asyncio.Event}
+        self._orderbook_events = {}
+
         # Tracking
         self.opportunities_detected = 0
         self.opportunities_scored = 0
@@ -305,29 +310,81 @@ class AdvancedArbitrageBot:
                 f"Failed: {failed_exchanges}"
             )
 
-    async def fetch_orderbook(self, exchange_name: str, symbol: str) -> EnhancedOrderBook:
-        """Fetch enhanced orderbook"""
-        cache_key = f"ob:{exchange_name}:{symbol}"
+    async def _stream_orderbook(self, exchange_name: str, symbol: str):
+        """Persistent WebSocket stream for one exchange/symbol pair.
 
-        # Check cache
-        cached = await self.cache.get(cache_key)
-        if cached:
-            # Staleness guard: reject cached data older than 5 seconds
-            cached_time = datetime.fromisoformat(cached['timestamp'])
-            age_seconds = (datetime.now(timezone.utc) - cached_time).total_seconds()
-            if age_seconds > 5.0:
-                logger.debug(f"Rejecting stale cached orderbook for {exchange_name}:{symbol} ({age_seconds:.1f}s old)")
-                self.metrics.increment('orderbook_stale_rejects')
-            else:
-                self.metrics.increment('orderbook_cache_hits')
-                return EnhancedOrderBook(
-                    exchange=cached['exchange'],
-                    symbol=cached['symbol'],
-                    timestamp=cached_time,
-                    bids=[(Decimal(p), Decimal(v)) for p, v in cached['bids']],
-                    asks=[(Decimal(p), Decimal(v)) for p, v in cached['asks']]
+        Continuously calls watch_order_book (ccxt.pro's blocking WS call)
+        and stores the latest snapshot in-memory for the scanner to read.
+        """
+        exchange = self.exchanges[exchange_name]
+        backoff = 1
+        max_backoff = 30
+
+        while self.running:
+            try:
+                ob_data = await exchange.watch_order_book(symbol)
+                now = datetime.now(timezone.utc)
+
+                orderbook = EnhancedOrderBook(
+                    exchange=exchange_name,
+                    symbol=symbol,
+                    timestamp=now,
+                    bids=[(Decimal(str(p)), Decimal(str(v))) for p, v in ob_data['bids'][:20]],
+                    asks=[(Decimal(str(p)), Decimal(str(v))) for p, v in ob_data['asks'][:20]]
                 )
 
+                # Store in-memory (lock-free: dict assignment is atomic in CPython)
+                self._latest_orderbooks[(exchange_name, symbol)] = orderbook
+
+                # Update price history for cointegration analysis
+                self.advanced_engine.update_price_history(
+                    exchange_name, symbol, orderbook.mid_price, now
+                )
+
+                # Signal the scanner that new data is available for this symbol
+                event = self._orderbook_events.get(symbol)
+                if event:
+                    event.set()
+
+                self.metrics.increment('orderbooks_fetched')
+                backoff = 1  # Reset backoff on success
+
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"WS stream error {exchange_name}:{symbol}: {e}")
+                self.metrics.increment('orderbook_errors')
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2, max_backoff)
+
+        logger.info(f"WS stream stopped: {exchange_name}:{symbol}")
+
+    def fetch_orderbook_sync(self, exchange_name: str, symbol: str) -> EnhancedOrderBook:
+        """Read latest orderbook from in-memory WS cache (non-blocking).
+
+        Returns None if no data or data is stale (>5s).
+        """
+        ob = self._latest_orderbooks.get((exchange_name, symbol))
+        if ob is None:
+            return None
+
+        age = (datetime.now(timezone.utc) - ob.timestamp).total_seconds()
+        if age > 5.0:
+            logger.debug(f"Rejecting stale orderbook {exchange_name}:{symbol} ({age:.1f}s old)")
+            self.metrics.increment('orderbook_stale_rejects')
+            return None
+
+        self.metrics.increment('orderbook_cache_hits')
+        return ob
+
+    async def fetch_orderbook(self, exchange_name: str, symbol: str) -> EnhancedOrderBook:
+        """Fetch orderbook — reads from persistent WS cache first, falls back to on-demand fetch."""
+        # Fast path: read from in-memory WS stream cache
+        ob = self.fetch_orderbook_sync(exchange_name, symbol)
+        if ob is not None:
+            return ob
+
+        # Fallback: direct WS call (for startup or after stream reconnection)
         try:
             exchange = self.exchanges[exchange_name]
             ob_data = await exchange.watch_order_book(symbol)
@@ -340,17 +397,13 @@ class AdvancedArbitrageBot:
                 asks=[(Decimal(str(p)), Decimal(str(v))) for p, v in ob_data['asks'][:20]]
             )
 
-            # Update price history for cointegration analysis
-            mid_price = orderbook.mid_price
+            self._latest_orderbooks[(exchange_name, symbol)] = orderbook
+
             self.advanced_engine.update_price_history(
-                exchange_name, symbol, mid_price, orderbook.timestamp
+                exchange_name, symbol, orderbook.mid_price, orderbook.timestamp
             )
 
-            # Cache for 1 second
-            await self.cache.set(cache_key, orderbook.__dict__, ttl=1)
-
             self.metrics.increment('orderbooks_fetched')
-
             return orderbook
 
         except Exception as e:
@@ -763,25 +816,36 @@ class AdvancedArbitrageBot:
                 )
 
     async def monitor_symbol(self, symbol: str):
-        """Continuously monitor one symbol"""
-        logger.info(f"👀 Monitoring {symbol}...")
+        """Continuously monitor one symbol, driven by WebSocket orderbook updates.
 
-        check_interval = self.config.performance.get('check_interval_seconds', 1)
+        Waits for the WS stream to signal new data (via asyncio.Event) instead of
+        polling with a fixed sleep interval. Falls back to a 2s timeout so we
+        still scan periodically even if the event is missed.
+        """
+        logger.info(f"👀 Monitoring {symbol} (event-driven)...")
+
+        # Create event for this symbol — WS streams will set() it on each update
+        event = asyncio.Event()
+        self._orderbook_events[symbol] = event
 
         while self.running:
             try:
-                # Find and score opportunities
+                # Wait for WS update or timeout after 2s (whichever comes first)
+                try:
+                    await asyncio.wait_for(event.wait(), timeout=2.0)
+                except asyncio.TimeoutError:
+                    pass  # Scan anyway on timeout
+                event.clear()
+
+                # Find and score opportunities using latest WS-cached orderbooks
                 opportunity = await self.find_and_score_arbitrage(symbol)
 
                 if opportunity:
-                    # Execute if passes all checks
                     await self.execute_opportunity(opportunity)
-
-                await asyncio.sleep(check_interval)
 
             except Exception as e:
                 logger.error(f"Error monitoring {symbol}: {e}", exc_info=True)
-                await asyncio.sleep(check_interval * 2)
+                await asyncio.sleep(2)
 
     async def print_stats(self):
         """Periodically print statistics"""
@@ -824,11 +888,21 @@ class AdvancedArbitrageBot:
         # Update state manager
         self.state_manager.update_trading_state(running=True)
 
-        # Monitor all symbols in parallel
-        tasks = [
-            self.monitor_symbol(symbol)
-            for symbol in self.config.symbols
-        ]
+        tasks = []
+
+        # Start persistent WebSocket orderbook streams (1 per exchange/symbol pair)
+        for exchange_name in self.exchanges:
+            for symbol in self.config.symbols:
+                tasks.append(self._stream_orderbook(exchange_name, symbol))
+
+        logger.info(
+            f"Started {len(tasks)} WebSocket streams for "
+            f"{len(self.exchanges)} exchanges × {len(self.config.symbols)} symbols"
+        )
+
+        # Monitor all symbols in parallel (event-driven by WS updates)
+        for symbol in self.config.symbols:
+            tasks.append(self.monitor_symbol(symbol))
 
         # Add stats printer
         tasks.append(self.print_stats())
