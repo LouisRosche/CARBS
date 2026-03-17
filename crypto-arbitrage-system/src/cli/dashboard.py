@@ -35,14 +35,14 @@ try:
 except ImportError:
     RICH_AVAILABLE = False
 
-from security.auth import AuthenticationManager, Session, AuthError
-from security.encryption import SecretsManager, EncryptionError
-from security.audit import AuditLogger, AuditCategory, get_audit_logger
-from security.access_control import AccessControl, Permission, EmergencyControls
+from ..security.auth import AuthenticationManager, Session, AuthError
+from ..security.encryption import SecretsManager, EncryptionError
+from ..security.audit import AuditLogger, AuditCategory, get_audit_logger
+from ..security.access_control import AccessControl, Permission, EmergencyControls
 
 # Import state manager for real-time data
 try:
-    from core.state_manager import StateManager, get_state_manager
+    from ..core.state_manager import StateManager, get_state_manager
     STATE_MANAGER_AVAILABLE = True
 except ImportError:
     STATE_MANAGER_AVAILABLE = False

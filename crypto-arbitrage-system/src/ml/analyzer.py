@@ -26,7 +26,7 @@ from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
 from .regime import RegimeDetector, Regime
-from .sentiment import TransformerSentimentAnalyzer
+from .sentiment import TransformerSentimentAnalyzer, TRANSFORMERS_AVAILABLE
 from .ner import CryptoNER
 from .events import NewsEventDetector
 from .models import SentimentResult, NewsEvent
@@ -57,6 +57,15 @@ class MLAnalyzer:
     async def initialize(self) -> None:
         """Initialize all ML models. Call once at startup."""
         if self._initialized:
+            return
+
+        if not TRANSFORMERS_AVAILABLE:
+            logger.warning(
+                "ML dependencies (torch, transformers) not installed. "
+                "ML features will use fallback methods. "
+                "Install with: pip install torch transformers"
+            )
+            self._initialized = True
             return
 
         try:

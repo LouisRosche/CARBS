@@ -1,29 +1,23 @@
 # src/exchanges — Exchange Adapter Module
 
 ## Purpose
-CCXT Pro WebSocket adapters for **Binance, MEXC, and KuCoin**.
-Each adapter wraps raw CCXT calls with credential management and error handling.
+CCXT Pro WebSocket adapters for **Binance** and **MEXC** (extensible to KuCoin, others).
+The bot uses **ccxt.pro exchange objects directly** — there is no custom BaseExchange wrapper.
 
 ## Key Files
-- `base.py` — `BaseExchange`: abstract base class with credential storage (`SecureString`)
-- `binance.py` — Binance adapter
-- `mexc.py` — MEXC adapter
-- `kucoin.py` — KuCoin adapter (disabled for US users in config)
-- `manager.py` — Exchange lifecycle management
+- `enums.py` — `OrderSide`, `OrderType`, `OrderStatus`
+- `models.py` — `Ticker`, `OrderBook`, `Balance`, `Order`, `Trade` data models
 - `rate_limiter.py` — Token bucket rate limiter
-- `websocket_manager.py` — WebSocket connection management
-- `models.py` — Exchange data models
-- `enums.py` — Exchange-related enumerations
-- `exceptions.py` — Custom exception types
+- `websocket_manager.py` — Standalone WebSocket management (BinanceWebSocket, MEXCWebSocket, KuCoinWebSocket). Currently unused by `advanced_main.py` which uses ccxt.pro's `watch_order_book` directly. Candidate for future integration.
+- `exceptions.py` — `ExchangeError` custom exception
 
-## Patterns
-- Adapters inherit from `BaseExchange` in `base.py`
-- Credentials loaded via `src/utils/secure_credentials.py` (Fernet-encrypted `SecureString`)
-- WebSocket connections use CCXT Pro's `watch_order_book` and `watch_ticker`
-- Reconnection logic uses exponential backoff (max 5 retries)
+## Architecture
+- `advanced_main.py` instantiates ccxt.pro exchange classes directly (e.g., `ccxt.pro.binance()`)
+- Orderbook data flows through ccxt.pro's `watch_order_book` WebSocket API
+- No custom adapter layer between business logic and ccxt.pro
 
 ## Critical Rules
-- NEVER store API keys in adapter classes — always read from encrypted store
+- NEVER store API keys in code — always read from `.env` via encrypted store
 - SSL verification MUST remain enabled on all connections
 - Rate limiting is per-exchange; respect CCXT's built-in rate limiter
 
@@ -33,10 +27,10 @@ Each adapter wraps raw CCXT calls with credential management and error handling.
 try:
     result = await exchange.fetch_ticker(symbol)
 except ccxt.NetworkError as e:
-    logger.warning("network_error", exchange=self.name, error=str(e))
-    # Circuit breaker will handle retry logic
+    logger.warning("network_error", exchange=name, error=str(e))
+    # Circuit breaker handles retry logic
 except ccxt.ExchangeError as e:
-    logger.error("exchange_error", exchange=self.name, error=str(e))
+    logger.error("exchange_error", exchange=name, error=str(e))
     raise
 ```
 
