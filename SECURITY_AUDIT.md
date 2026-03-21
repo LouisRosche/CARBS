@@ -487,3 +487,95 @@ def delete(self, key: str) -> bool:
 9. Fix M2: Use aggressive limit/market orders for unwind scenarios
 10. Fix M3: Bind Prometheus to localhost or proxy through authed API
 11. Fix M4: Remove false "secure overwrite" — document Python's limitations honestly
+
+---
+
+## Appendix: Security Module Findings
+
+The following additional findings were identified in the security subsystem (`src/security/`).
+
+### S1: Hostname-Based Fallback Key Derivation (Critical)
+
+**Location:** `src/security/auth.py:34-48`
+
+**Issue:** When `CARBS_MASTER_KEY` and `CARBS_JWT_SECRET` are unset, the user data encryption key is derived from the machine hostname with a hardcoded salt. Hostnames are publicly discoverable — an attacker knowing the hostname can derive the encryption key and decrypt all user data.
+
+```python
+machine_id = f"carbs-{socket.gethostname()}-user-data"
+master_key = machine_id  # Predictable!
+salt = b'CARBS_USER_DATA_ENCRYPTION_SALT_'  # Hardcoded!
+```
+
+**Remediation:** Fail startup if `CARBS_MASTER_KEY` is not set. Never fall back to deterministic machine-based keys.
+
+---
+
+### S2: Unsafe Dynamic Approval Rule Modification (Critical)
+
+**Location:** `src/security/approval_workflow.py:280-286`
+
+**Issue:** `configure_rule()` uses `hasattr()`/`setattr()` to modify approval rules with no type or value validation:
+
+```python
+for key, value in kwargs.items():
+    if hasattr(rule, key):
+        setattr(rule, key, value)  # No validation
+```
+
+**Exploit:** An attacker (or misconfigured code) can set `required_approvers=0` to bypass quorum requirements, or `allow_self_approval=True` to self-approve mode switches from paper to live trading.
+
+**Remediation:** Whitelist allowed parameters and validate types/ranges.
+
+---
+
+### S3: TOCTOU in Trade Approval Check (High)
+
+**Location:** `src/security/approval_workflow.py:700-724`
+
+**Issue:** `check_trade_approval()` checks `self._approved_trade_ids[trade_id]` without synchronization. Between the dict lookup and the trade execution, another coroutine can expire or remove the approval via `mark_trade_approved()`.
+
+**Remediation:** Use `asyncio.Lock()` around check-and-consume, and atomically remove the approval on use.
+
+---
+
+### S4: JWT Payload Type Confusion (High)
+
+**Location:** `src/security/auth.py:666+`
+
+**Issue:** JWT payload fields (`session_id`, `username`, `role`) are read via `.get()` without type validation. A crafted JWT with `session_id: {"key": "value"}` or `role: ["admin"]` could cause authorization logic to behave unexpectedly.
+
+**Remediation:** Validate all JWT claim types after decode:
+```python
+if not isinstance(session_id, str) or not session_id:
+    raise TokenError("Invalid session_id in token")
+```
+
+---
+
+### S5: IP Spoofing via Broad Trusted Proxy Networks (Medium)
+
+**Location:** `src/api/middleware.py:36-41`
+
+**Issue:** Trusted proxy networks include the entire `172.16.0.0/12` range (1M+ IPs). In shared hosting or multi-tenant environments, this could trust unintended proxies, allowing `X-Forwarded-For` spoofing to bypass IP-based rate limiting and access controls.
+
+**Remediation:** Restrict to actual deployment network (e.g., `172.17.0.0/16` for Docker default bridge).
+
+---
+
+### S6: Race Condition in IP Rate Limiting (Medium)
+
+**Location:** `src/security/auth.py:412-431`
+
+**Issue:** `_check_ip_rate_limit()` performs a non-atomic read-modify-write on `self._ip_attempts`. Concurrent login attempts can bypass the rate limit because the check and append are not synchronized.
+
+**Remediation:** Wrap the entire check-and-add in a lock, or use an atomic counter.
+
+---
+
+### S7: Floating-Point Precision Loss in Risk Calculations (High)
+
+**Location:** `src/core/risk_manager.py:463, 492, 550`
+
+**Issue:** Financial calculations convert `Decimal` to `float()` for Sharpe ratio, position sizing, and VaR, then convert back via `Decimal(str(float_val))`. This introduces rounding errors that accumulate across many trades. In a high-frequency arbitrage system, sub-basis-point errors in position sizing can compound into material P&L discrepancies.
+
+**Remediation:** Keep all financial math in `Decimal`; only convert to `float` for display/logging.
