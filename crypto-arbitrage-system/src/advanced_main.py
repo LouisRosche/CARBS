@@ -747,8 +747,11 @@ class AdvancedArbitrageBot:
         """Save opportunity and execution to database"""
         try:
             async with self.db_pool.acquire() as conn:
-                # Insert opportunity
-                opp_id = await conn.fetchval("""
+                # Use explicit transaction to ensure atomicity —
+                # if execution INSERT fails, opportunity INSERT is rolled back too
+                async with conn.transaction():
+                    # Insert opportunity
+                    opp_id = await conn.fetchval("""
                     INSERT INTO opportunities
                     (detected_at, buy_exchange, sell_exchange, symbol,
                      buy_price, sell_price, spread_percent, spread_bps,

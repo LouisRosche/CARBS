@@ -570,7 +570,8 @@ class TradeRepository:
                 params.append(symbol)
                 query += f" AND symbol = ${len(params)}"
 
-            query += f" ORDER BY created_at DESC LIMIT {limit}"
+            params.append(limit)
+            query += f" ORDER BY created_at DESC LIMIT ${len(params)}"
 
             rows = await conn.fetch(query, *params)
             return [self._row_to_trade(row) for row in rows]
@@ -604,7 +605,7 @@ class TradeRepository:
 
             if exchange:
                 params.append(exchange)
-                query = query.replace("WHERE", f"WHERE exchange = ${len(params)} AND")
+                query += f" AND exchange = ${len(params)}"
 
             row = await conn.fetchrow(query, *params)
             return dict(row) if row else {}
@@ -685,8 +686,8 @@ class ArbitrageRepository:
                     AVG(spread_bps) as avg_spread_bps,
                     AVG(total_execution_time_ms) as avg_execution_time
                 FROM arbitrage_executions
-                WHERE created_at > NOW() - INTERVAL '%s days'
-            """ % days)
+                WHERE created_at > NOW() - make_interval(days => $1)
+            """, days)
             return dict(row) if row else {}
 
 
@@ -815,9 +816,9 @@ class BalanceRepository:
             rows = await conn.fetch("""
                 SELECT * FROM balance_snapshots
                 WHERE exchange = $1 AND currency = $2
-                AND snapshot_at > NOW() - INTERVAL '%s days'
+                AND snapshot_at > NOW() - make_interval(days => $3)
                 ORDER BY snapshot_at DESC
-            """ % days, exchange, currency)
+            """, exchange, currency, days)
 
             return [
                 BalanceSnapshot(
