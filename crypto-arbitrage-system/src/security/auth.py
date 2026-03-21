@@ -16,6 +16,7 @@ import secrets
 import hashlib
 import logging
 import functools
+import threading
 from pathlib import Path
 from typing import Optional, Dict, Any, Callable
 from dataclasses import dataclass, field
@@ -120,11 +121,17 @@ class TOTP:
     Time-based One-Time Password (RFC 6238)
 
     Compatible with Google Authenticator, Authy, etc.
+    Includes replay protection per RFC 6238 Section 5.2.
     """
 
     DIGITS = 6
     PERIOD = 30  # seconds
     ALGORITHM = 'SHA1'
+
+    # Track used tokens to prevent replay within the tolerance window
+    # Key: (secret_hash, token), Value: timestamp when used
+    _used_tokens: Dict[tuple, float] = {}
+    _used_tokens_lock = threading.Lock()
 
     @staticmethod
     def generate_secret() -> str:
@@ -171,7 +178,7 @@ class TOTP:
     @staticmethod
     def verify(secret: str, token: str, tolerance: int = 1) -> bool:
         """
-        Verify TOTP token
+        Verify TOTP token with replay protection (RFC 6238 Section 5.2)
 
         Args:
             secret: Base32-encoded secret
@@ -179,14 +186,32 @@ class TOTP:
             tolerance: Number of periods to check before/after
 
         Returns:
-            True if valid
+            True if valid and not previously used
         """
         timestamp = int(time.time())
+
+        # Hash the secret for the replay cache key (don't store raw secrets in memory)
+        secret_hash = hashlib.sha256(secret.encode()).hexdigest()[:16]
+
+        # Clean expired entries from replay cache (older than 2x tolerance window)
+        max_age = TOTP.PERIOD * (tolerance + 1) * 2
+        with TOTP._used_tokens_lock:
+            cutoff = time.time() - max_age
+            TOTP._used_tokens = {
+                k: v for k, v in TOTP._used_tokens.items() if v > cutoff
+            }
 
         # Check current and adjacent time windows
         for offset in range(-tolerance, tolerance + 1):
             check_time = timestamp + (offset * TOTP.PERIOD)
             if hmac.compare_digest(TOTP.get_totp_token(secret, check_time), token):
+                # Check replay: has this exact token been used for this secret?
+                cache_key = (secret_hash, token)
+                with TOTP._used_tokens_lock:
+                    if cache_key in TOTP._used_tokens:
+                        logger.warning("TOTP replay detected — token already used")
+                        return False
+                    TOTP._used_tokens[cache_key] = time.time()
                 return True
 
         return False
@@ -421,11 +446,24 @@ class AuthenticationManager:
 
         self._save_users()
 
+    # Maximum tracked IPs to prevent memory exhaustion from distributed attacks
+    MAX_TRACKED_IPS = 10000
+
     def _check_ip_rate_limit(self, ip_address: str) -> bool:
-        """Check if IP is rate limited"""
+        """Check if IP is rate limited, with LRU eviction"""
         now = time.time()
         window = 300  # 5 minutes
         max_attempts = 20
+
+        # LRU eviction: if tracking too many IPs, drop oldest entries
+        if len(self._ip_attempts) > self.MAX_TRACKED_IPS:
+            # Find and remove IPs with only stale entries
+            stale_ips = []
+            for ip, attempts in self._ip_attempts.items():
+                if not attempts or (now - max(attempts)) > window:
+                    stale_ips.append(ip)
+            for ip in stale_ips[:len(self._ip_attempts) // 10]:
+                del self._ip_attempts[ip]
 
         if ip_address not in self._ip_attempts:
             self._ip_attempts[ip_address] = []
@@ -464,6 +502,17 @@ class AuthenticationManager:
 
         if len(password) < 12:
             raise AuthError("Password must be at least 12 characters")
+
+        # Require character diversity to prevent trivial passwords like 'aaaaaaaaaaaa'
+        has_upper = any(c.isupper() for c in password)
+        has_lower = any(c.islower() for c in password)
+        has_digit = any(c.isdigit() for c in password)
+        has_special = any(not c.isalnum() for c in password)
+        complexity_score = sum([has_upper, has_lower, has_digit, has_special])
+        if complexity_score < 3:
+            raise AuthError(
+                "Password must contain at least 3 of: uppercase, lowercase, digit, special character"
+            )
 
         password_hash, password_salt = self._hash_password(password)
 
@@ -647,15 +696,23 @@ class AuthenticationManager:
 
         return session
 
+    # JWT issuer/audience constants
+    JWT_ISSUER = 'carbs-auth'
+    JWT_AUDIENCE = 'carbs-api'
+
     def create_jwt(self, session: Session) -> str:
-        """Create JWT token for session"""
+        """Create JWT token for session with standard security claims"""
         payload = {
             'session_id': session.session_id,
             'user_id': session.user_id,
             'username': session.username,
             'role': session.role,
             'exp': session.expires_at.timestamp(),
-            'iat': session.created_at.timestamp()
+            'iat': session.created_at.timestamp(),
+            'nbf': session.created_at.timestamp(),
+            'jti': secrets.token_urlsafe(16),
+            'iss': self.JWT_ISSUER,
+            'aud': self.JWT_AUDIENCE,
         }
 
         return jwt.encode(payload, self._jwt_secret, algorithm='HS256')
@@ -674,7 +731,12 @@ class AuthenticationManager:
             TokenError: If token is invalid or expired
         """
         try:
-            payload = jwt.decode(token, self._jwt_secret, algorithms=['HS256'])
+            payload = jwt.decode(
+                token, self._jwt_secret, algorithms=['HS256'],
+                issuer=self.JWT_ISSUER,
+                audience=self.JWT_AUDIENCE,
+                options={"require": ["exp", "iat", "iss", "aud"]}
+            )
             session_id = payload.get('session_id')
 
             # Validate JWT claim types to prevent type confusion attacks
@@ -715,7 +777,12 @@ class AuthenticationManager:
             TokenError: If token is invalid, expired, or revoked
         """
         try:
-            payload = jwt.decode(token, self._jwt_secret, algorithms=['HS256'])
+            payload = jwt.decode(
+                token, self._jwt_secret, algorithms=['HS256'],
+                issuer=self.JWT_ISSUER,
+                audience=self.JWT_AUDIENCE,
+                options={"require": ["exp", "iat", "iss", "aud"]}
+            )
             session_id = payload.get('session_id')
 
             # Validate JWT claim types to prevent type confusion attacks
@@ -781,10 +848,10 @@ class AuthenticationManager:
         Returns:
             Tuple of (new_jwt, new_refresh_token)
         """
-        # Find session by refresh token
+        # Find session by refresh token using constant-time comparison
         session = None
         for s in self._sessions.values():
-            if s.refresh_token == refresh_token:
+            if hmac.compare_digest(s.refresh_token, refresh_token):
                 session = s
                 break
 
