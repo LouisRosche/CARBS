@@ -71,7 +71,7 @@ def test_enhanced_orderbook_mid_price():
     )
 
     assert ob.mid_price == Decimal('50050')
-    assert ob.spread_bps == pytest.approx(float(Decimal('19.98')), rel=0.01)
+    assert float(ob.spread_bps) == pytest.approx(19.98, rel=0.01)
 
 
 def test_enhanced_orderbook_vwap():
@@ -158,12 +158,23 @@ def test_slippage_increases_with_size():
     """Test that slippage increases with order size"""
     model = AlmgrenChrissSlippage()
 
+    # Use a multi-level orderbook so depth_impact scales with order size
     ob = EnhancedOrderBook(
         exchange='binance',
         symbol='BTC/USDT',
         timestamp=datetime.now(timezone.utc),
-        bids=[(Decimal('50000'), Decimal('1.0'))],
-        asks=[(Decimal('50100'), Decimal('1.0'))]
+        bids=[
+            (Decimal('50000'), Decimal('0.5')),
+            (Decimal('49900'), Decimal('0.5')),
+            (Decimal('49800'), Decimal('1.0')),
+            (Decimal('49700'), Decimal('2.0')),
+        ],
+        asks=[
+            (Decimal('50100'), Decimal('0.5')),
+            (Decimal('50200'), Decimal('0.5')),
+            (Decimal('50300'), Decimal('1.0')),
+            (Decimal('50400'), Decimal('2.0')),
+        ]
     )
 
     slippage_small = model.estimate_slippage(Decimal('1000'), ob)
@@ -272,22 +283,28 @@ def test_price_history_tracker():
 
 def test_cointegration_detection():
     """Test cointegration detection"""
+    import random
+    random.seed(42)
     tracker = PriceHistoryTracker()
 
-    # Add cointegrated series (same with small noise)
+    # Add cointegrated series with some realistic noise so std-dev is non-zero
     for i in range(50):
-        base_price = 50000 + i * 10
+        base_price = 50000 + i * 10 + random.uniform(-5, 5)
         tracker.add_price(
             'binance', 'BTC/USDT',
-            Decimal(str(base_price)), datetime.now(timezone.utc)
+            Decimal(str(round(base_price, 2))), datetime.now(timezone.utc)
         )
         tracker.add_price(
             'coinbase', 'BTC/USDT',
-            Decimal(str(base_price + 50)), datetime.now(timezone.utc)  # Constant spread
+            Decimal(str(round(base_price + 50 + random.uniform(-2, 2), 2))),
+            datetime.now(timezone.utc)
         )
 
     is_coint, p_value = tracker.test_cointegration('binance', 'coinbase', 'BTC/USDT')
 
+    # p_value should be a valid number (not NaN)
+    import math
+    assert not math.isnan(p_value), "p_value should not be NaN"
     # Cointegrated series should have low p-value
     assert p_value < 0.7
 

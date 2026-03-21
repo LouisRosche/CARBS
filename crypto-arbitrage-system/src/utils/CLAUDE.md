@@ -4,7 +4,7 @@
 Shared utilities: encrypted credential management, Redis caching, Prometheus metrics.
 
 ## Key Files
-- `secure_credentials.py` — `SecureCredentialStore` (Fernet encryption, PBKDF2 key derivation, 100k iterations) and `SecureString` (per-value encrypted wrapper)
+- `secure_credentials.py` — `SecureCredentialStore` (Fernet encryption, PBKDF2 key derivation, 600k iterations) and `SecureString` (per-value encrypted wrapper). `cryptography` package is a hard requirement — no XOR fallback.
 - `cache.py` — `RedisCache` (async Redis client with TLS support, retry logic), `TokenBlacklist`, `SessionStore`
 - `metrics.py` — `MetricsCollector` (basic Prometheus Counter/Gauge/Histogram registration)
 - `error_handling.py` — Centralized error handling utilities

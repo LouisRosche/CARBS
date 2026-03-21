@@ -18,6 +18,7 @@ Based on resilience patterns from:
 import asyncio
 import random
 import re
+import uuid
 from decimal import Decimal, InvalidOperation
 from typing import Dict, Optional, List
 from dataclasses import dataclass, field
@@ -644,22 +645,28 @@ class ExecutionEngine:
                 return result
 
             # Lock balances to prevent double-spending
+            trade_id = f"arb_{uuid.uuid4().hex[:16]}"
             quote_lock = await self.balance_manager.lock_balance(
                 exchange=buy_exchange,
                 asset=quote_asset,
                 amount=amount * buy_price,
-                trade_id=f"arb_{int(time.time() * 1000)}"
+                trade_id=trade_id
             )
             base_lock = await self.balance_manager.lock_balance(
                 exchange=sell_exchange,
                 asset=base_asset,
                 amount=amount,
-                trade_id=f"arb_{int(time.time() * 1000)}"
+                trade_id=trade_id
             )
         else:
             quote_lock = None
             base_lock = None
-            logger.warning("No balance manager - executing without balance validation!")
+            # CRITICAL: Refuse to execute live trades without balance validation
+            if self.config.trading.mode != 'paper':
+                result.error_message = "Balance manager required for live trading"
+                logger.error("❌ Cannot execute live trades without balance manager!")
+                return result
+            logger.warning("No balance manager - paper trading without balance validation")
 
         logger.info(
             f"🎯 Executing arbitrage: Buy {amount} {symbol} on {buy_exchange} "
@@ -704,7 +711,23 @@ class ExecutionEngine:
                 # If sell succeeded, need to unwind
                 if not isinstance(sell_order, Exception) and sell_order.is_filled:
                     logger.warning("Unwinding sell position due to failed buy")
-                    await self._execute_order(sell_exchange, symbol, 'buy', sell_order.filled_amount, sell_order.avg_fill_price)
+                    try:
+                        unwind = await self._execute_order(
+                            sell_exchange, symbol, 'buy',
+                            sell_order.filled_amount, sell_order.avg_fill_price
+                        )
+                        if not unwind.is_filled:
+                            logger.critical(
+                                f"🚨 UNWIND FAILED: Could not buy back {sell_order.filled_amount} "
+                                f"{symbol} on {sell_exchange}. ORPHANED POSITION — manual intervention required!"
+                            )
+                            result.error_message += f"; UNWIND FAILED: {unwind.error_message}"
+                    except Exception as unwind_err:
+                        logger.critical(
+                            f"🚨 UNWIND EXCEPTION: {unwind_err}. "
+                            f"Orphaned sell of {sell_order.filled_amount} {symbol} on {sell_exchange}!"
+                        )
+                        result.error_message += f"; UNWIND EXCEPTION: {unwind_err}"
                 return result
 
             if isinstance(sell_order, Exception):
@@ -713,7 +736,23 @@ class ExecutionEngine:
                 # If buy succeeded, need to unwind
                 if buy_order.is_filled:
                     logger.warning("Unwinding buy position due to failed sell")
-                    await self._execute_order(buy_exchange, symbol, 'sell', buy_order.filled_amount, buy_order.avg_fill_price)
+                    try:
+                        unwind = await self._execute_order(
+                            buy_exchange, symbol, 'sell',
+                            buy_order.filled_amount, buy_order.avg_fill_price
+                        )
+                        if not unwind.is_filled:
+                            logger.critical(
+                                f"🚨 UNWIND FAILED: Could not sell back {buy_order.filled_amount} "
+                                f"{symbol} on {buy_exchange}. ORPHANED POSITION — manual intervention required!"
+                            )
+                            result.error_message += f"; UNWIND FAILED: {unwind.error_message}"
+                    except Exception as unwind_err:
+                        logger.critical(
+                            f"🚨 UNWIND EXCEPTION: {unwind_err}. "
+                            f"Orphaned buy of {buy_order.filled_amount} {symbol} on {buy_exchange}!"
+                        )
+                        result.error_message += f"; UNWIND EXCEPTION: {unwind_err}"
                 return result
 
             # Check if both filled
@@ -830,8 +869,8 @@ class ExecutionEngine:
             # LIVE TRADING MODE - Real exchange execution
             logger.info(f"🔴 LIVE ORDER: {side.upper()} {amount} {symbol} @ {price} on {exchange_name}")
 
-            # Convert symbol format for exchange (BTC/USDT -> BTCUSDT for some exchanges)
-            exchange_symbol = symbol.replace("/", "")
+            # Convert symbol format for exchange (exchange-specific formatting)
+            exchange_symbol = self._format_symbol_for_exchange(exchange_name, symbol)
 
             # Determine order side
             order_side = OrderSide.BUY if side.lower() == 'buy' else OrderSide.SELL
@@ -846,6 +885,16 @@ class ExecutionEngine:
                     quantity=amount,
                     price=price
                 )
+
+                # Validate order_id before proceeding — an untracked order is dangerous
+                if not exchange_order.order_id:
+                    order.status = OrderStatus.FAILED
+                    order.error_message = "Exchange returned empty order_id — order may be orphaned"
+                    logger.critical(
+                        f"🚨 CRITICAL: Exchange {exchange_name} returned empty order_id for "
+                        f"{side} {amount} {symbol}. Manual reconciliation may be required."
+                    )
+                    return order
 
                 # Map exchange order to our order state
                 order.order_id = exchange_order.order_id
@@ -902,6 +951,31 @@ class ExecutionEngine:
             ExchangeOrderStatus.EXPIRED: OrderStatus.TIMEOUT,
         }
         return status_map.get(exchange_status, OrderStatus.PENDING)
+
+    @staticmethod
+    def _format_symbol_for_exchange(exchange_name: str, symbol: str) -> str:
+        """
+        Format trading symbol for the specific exchange's API.
+
+        Different exchanges expect different symbol formats:
+        - Binance, MEXC: BTCUSDT (no separator)
+        - KuCoin: BTC-USDT (dash separator)
+        - Others: fall back to the canonical BTC/USDT (slash)
+        """
+        # Exchanges that use no separator
+        no_separator = {"binance", "mexc", "gate", "bybit"}
+        # Exchanges that use dash separator
+        dash_separator = {"kucoin", "okx"}
+
+        name_lower = exchange_name.lower()
+        if name_lower in no_separator:
+            return symbol.replace("/", "")
+        elif name_lower in dash_separator:
+            return symbol.replace("/", "-")
+        else:
+            # Default: pass through the canonical format (BTC/USDT)
+            # Most ccxt exchanges accept this
+            return symbol
 
     async def _wait_for_fill(
         self,
@@ -983,8 +1057,35 @@ class ExecutionEngine:
             if cancelled:
                 order.status = OrderStatus.CANCELLED
                 logger.info(f"Cancelled timed-out order {order.order_id}")
+            else:
+                # Cancel returned False — order may have filled while we tried to cancel
+                logger.warning(
+                    f"Cancel returned False for order {order.order_id} — "
+                    f"order may have filled during cancellation. Verifying final state..."
+                )
+                try:
+                    if breaker:
+                        protected_get = breaker.call(exchange.get_order)
+                        final_state = await protected_get(symbol, order.order_id)
+                    else:
+                        final_state = await exchange.get_order(symbol, order.order_id)
+                    order.status = self._map_exchange_status(final_state.status)
+                    order.filled_amount = final_state.filled_quantity
+                    order.avg_fill_price = final_state.avg_fill_price or order.price
+                    logger.info(
+                        f"Final state for order {order.order_id}: "
+                        f"status={order.status.value}, filled={order.filled_amount}"
+                    )
+                except Exception as verify_err:
+                    logger.critical(
+                        f"🚨 Cannot verify final state of order {order.order_id}: {verify_err}. "
+                        f"Order may be live on exchange — manual check required!"
+                    )
         except Exception as e:
-            logger.error(f"Failed to cancel timed-out order: {e}")
+            logger.critical(
+                f"🚨 Failed to cancel timed-out order {order.order_id}: {e}. "
+                f"Order may still be live on exchange — manual intervention required!"
+            )
 
         return order
 

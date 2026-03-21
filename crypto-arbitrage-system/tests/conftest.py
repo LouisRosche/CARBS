@@ -30,13 +30,6 @@ import json
 pytest_plugins = ['pytest_asyncio']
 
 
-@pytest.fixture(scope="session")
-def event_loop():
-    """Create event loop for async tests"""
-    loop = asyncio.new_event_loop()
-    yield loop
-    loop.close()
-
 
 @pytest.fixture
 def sample_trade_data() -> Dict[str, Any]:

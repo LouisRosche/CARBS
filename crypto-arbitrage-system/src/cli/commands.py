@@ -819,13 +819,13 @@ Examples:
 
 
 async def _async_main():
-    """Async CLI handler"""
+    """Async CLI entry point"""
     handler = CommandHandler()
     await handler.handle()
 
 
 def main():
-    """Sync CLI entry point (used by console_scripts in pyproject.toml)"""
+    """CLI entry point (sync wrapper for console_scripts)"""
     asyncio.run(_async_main())
 
 

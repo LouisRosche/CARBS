@@ -321,14 +321,14 @@ class BalanceManager:
             return None
         return self._balances[exchange].get_balance(asset)
 
-    def get_available_balance(
+    async def get_available_balance(
         self,
         exchange: str,
         asset: str,
         include_reserve: bool = False
     ) -> Decimal:
         """
-        Get available balance for trading.
+        Get available balance for trading (async-safe).
 
         Args:
             exchange: Exchange name
@@ -342,8 +342,8 @@ class BalanceManager:
         if not balance:
             return Decimal("0")
 
-        # Get locked amount from our internal locks
-        locked_amount = self._get_locked_amount(exchange, asset)
+        # Get locked amount from our internal locks (under async lock for safety)
+        locked_amount = await self._get_locked_amount(exchange, asset)
 
         # Calculate available
         available = balance.free - locked_amount
@@ -355,13 +355,14 @@ class BalanceManager:
 
         return max(Decimal("0"), available)
 
-    def _get_locked_amount(self, exchange: str, asset: str) -> Decimal:
-        """Get total amount locked by pending trades"""
-        total_locked = Decimal("0")
-        for lock in self._locks.values():
-            if lock.exchange == exchange and lock.asset == asset and lock.is_active:
-                total_locked += lock.amount
-        return total_locked
+    async def _get_locked_amount(self, exchange: str, asset: str) -> Decimal:
+        """Get total amount locked by pending trades (async-safe)."""
+        async with self._lock:
+            total_locked = Decimal("0")
+            for lock in self._locks.values():
+                if lock.exchange == exchange and lock.asset == asset and lock.is_active:
+                    total_locked += lock.amount
+            return total_locked
 
     async def validate_trade(
         self,
@@ -409,7 +410,7 @@ class BalanceManager:
             return False, f"Stale balance data for {exchange} ({age:.0f}s old). Refresh required."
 
         # Get available balance
-        available = self.get_available_balance(exchange, asset)
+        available = await self.get_available_balance(exchange, asset)
 
         if available < amount:
             self._validation_failures += 1
@@ -451,7 +452,7 @@ class BalanceManager:
         """
         # Check quote asset on buy exchange (need USDT to buy BTC)
         quote_needed = amount * buy_price
-        quote_available = self.get_available_balance(buy_exchange, quote_asset)
+        quote_available = await self.get_available_balance(buy_exchange, quote_asset)
 
         if quote_available < quote_needed:
             return False, (
@@ -460,7 +461,7 @@ class BalanceManager:
             )
 
         # Check base asset on sell exchange (need BTC to sell)
-        base_available = self.get_available_balance(sell_exchange, base_asset)
+        base_available = await self.get_available_balance(sell_exchange, base_asset)
 
         if base_available < amount:
             return False, (
@@ -492,8 +493,22 @@ class BalanceManager:
             Lock ID if successful, None if insufficient balance
         """
         async with self._lock:
-            # Check availability inside the lock to prevent TOCTOU race conditions
-            available = self.get_available_balance(exchange, asset)
+            # Inline availability check to prevent TOCTOU race and avoid deadlock
+            # (get_available_balance -> _get_locked_amount also acquires self._lock)
+            balance = self.get_balance(exchange, asset)
+            if not balance:
+                logger.warning(f"No balance data for {asset} on {exchange}")
+                return None
+
+            # Calculate locked amount inline (already holding self._lock)
+            locked_amount = sum(
+                lock.amount for lock in self._locks.values()
+                if lock.exchange == exchange and lock.asset == asset and lock.is_active
+            )
+            available = balance.free - locked_amount
+            reserve = balance.total * self.reserve_ratio
+            available = max(Decimal("0"), available - reserve)
+
             if available < amount:
                 logger.warning(
                     f"Cannot lock {amount} {asset} on {exchange}: "

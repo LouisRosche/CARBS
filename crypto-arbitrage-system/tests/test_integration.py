@@ -1433,7 +1433,7 @@ class TestHealthServerIntegration:
 
         assert slow_result is not None
         assert slow_result.status == HealthStatus.UNHEALTHY
-        assert "timeout" in slow_result.message.lower()
+        assert "timed out" in slow_result.message.lower()
 
 
 # =============================================================================

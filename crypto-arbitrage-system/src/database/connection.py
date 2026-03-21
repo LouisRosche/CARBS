@@ -17,7 +17,7 @@ from typing import Optional
 logger = logging.getLogger(__name__)
 
 
-class ConnectionError(Exception):
+class DatabaseConnectionError(Exception):
     """Raised when database connection fails"""
     pass
 
@@ -102,7 +102,7 @@ class DatabasePool:
                 if attempt < self._max_retries - 1:
                     await asyncio.sleep(self._retry_delay * (attempt + 1))
 
-        raise ConnectionError(
+        raise DatabaseConnectionError(
             f"Failed to connect to database after {self._max_retries} attempts: {last_error}"
         )
 
@@ -118,7 +118,7 @@ class DatabasePool:
             ConnectionError: If pool is not connected
         """
         if not self._connected or not self.pool:
-            raise ConnectionError("Database pool not connected. Call connect() first.")
+            raise DatabaseConnectionError("Database pool not connected. Call connect() first.")
 
         conn = None
         try:

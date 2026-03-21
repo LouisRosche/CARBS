@@ -490,29 +490,18 @@ class TestGracefulDegradation:
         """
         Test circuit breaker pattern prevents cascade failures
         """
-        from src.core.execution_engine import CircuitBreaker
+        from src.core.execution_engine import CircuitBreaker, CircuitState
 
         # Circuit breaker should open after threshold failures
-        circuit = CircuitBreaker(failure_threshold=3, timeout_seconds=60)
+        circuit = CircuitBreaker(name='test', failure_threshold=3, timeout_seconds=60)
 
-        # Simulate failures
-        for i in range(5):
-            try:
-                if circuit.is_open():
-                    # Circuit is open, don't attempt call
-                    continue
+        # Simulate 3 consecutive failures via the real internal API
+        for _ in range(3):
+            circuit._on_failure()
 
-                # Simulate failing call
-                circuit.record_failure()
-
-                if circuit.failure_count >= circuit.failure_threshold:
-                    circuit.open()
-
-            except Exception:
-                pass
-
-        # Circuit should be open after 3+ failures
-        assert circuit.is_open()
+        # Circuit should be OPEN after reaching the failure threshold
+        assert circuit.state == CircuitState.OPEN
+        assert not circuit.is_available()
 
 
 class TestConcurrencyIssues:

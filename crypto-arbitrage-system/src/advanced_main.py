@@ -10,7 +10,9 @@ Integrates:
 """
 
 import asyncio
+import json
 import logging
+import logging.handlers
 import signal
 import sys
 from pathlib import Path
@@ -71,21 +73,72 @@ try:
 except ImportError:
     COMPLIANCE_AVAILABLE = False
 
-# Ensure log directory exists
-log_dir = Path('data/logs')
-log_dir.mkdir(parents=True, exist_ok=True)
-
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.StreamHandler(sys.stdout),
-        logging.FileHandler(log_dir / 'arbitrage.log')
-    ]
-)
-
+# Placeholder logger — reconfigured in setup_logging() once config is loaded
 logger = logging.getLogger(__name__)
+
+
+class _JSONFormatter(logging.Formatter):
+    """Structured JSON log formatter for machine-readable output."""
+
+    def format(self, record: logging.LogRecord) -> str:
+        log_entry = {
+            "ts": self.formatTime(record, self.datefmt),
+            "level": record.levelname,
+            "logger": record.name,
+            "msg": record.getMessage(),
+        }
+        if record.exc_info and record.exc_info[0] is not None:
+            log_entry["exception"] = self.formatException(record.exc_info)
+        return json.dumps(log_entry, default=str)
+
+
+def setup_logging(config_logging: dict) -> None:
+    """Configure logging from config.yaml's ``logging`` section.
+
+    Supports:
+    - ``level``: DEBUG / INFO / WARNING / ERROR / CRITICAL
+    - ``format``: ``json`` for structured output, anything else for text
+    - ``file_enabled``: whether to write to disk
+    - ``file_path``: log file location (relative OK)
+    - ``max_file_size_mb``: per-file size cap before rotation
+    - ``backup_count``: number of rotated files to keep
+    """
+    level_name = config_logging.get("level", "INFO").upper()
+    level = getattr(logging, level_name, logging.INFO)
+
+    fmt = config_logging.get("format", "text")
+    if fmt == "json":
+        formatter = _JSONFormatter()
+    else:
+        formatter = logging.Formatter(
+            "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+        )
+
+    # Build handler list
+    handlers: list[logging.Handler] = [logging.StreamHandler(sys.stdout)]
+
+    if config_logging.get("file_enabled", True):
+        log_path = Path(config_logging.get("file_path", "data/logs/arbitrage.log"))
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        max_bytes = int(config_logging.get("max_file_size_mb", 100)) * 1024 * 1024
+        backup_count = int(config_logging.get("backup_count", 5))
+        handlers.append(
+            logging.handlers.RotatingFileHandler(
+                log_path,
+                maxBytes=max_bytes,
+                backupCount=backup_count,
+            )
+        )
+
+    # Apply to root logger
+    root = logging.getLogger()
+    root.setLevel(level)
+    # Remove any pre-existing handlers (e.g. from basicConfig)
+    for h in root.handlers[:]:
+        root.removeHandler(h)
+    for h in handlers:
+        h.setFormatter(formatter)
+        root.addHandler(h)
 
 
 class AdvancedArbitrageBot:
@@ -122,6 +175,8 @@ class AdvancedArbitrageBot:
         self.shutdown_event = asyncio.Event()
 
         # Persistent WebSocket orderbook cache: {(exchange, symbol): EnhancedOrderBook}
+        # Note: dict[key] assignment is atomic within asyncio's single-threaded event loop
+        # (no preemptive context switch during assignment), so no lock is needed.
         self._latest_orderbooks = {}
         # Event fired when any orderbook updates for a given symbol: {symbol: asyncio.Event}
         self._orderbook_events = {}
@@ -144,6 +199,10 @@ class AdvancedArbitrageBot:
         except ConfigValidationError as e:
             logger.error(f"Invalid configuration: {e}")
             raise SystemExit(1)
+
+        # Apply logging config (RotatingFileHandler, level, format) now that config is loaded
+        logging_cfg = getattr(self.config, 'logging', None) or {}
+        setup_logging(logging_cfg)
 
         # Initialize state manager first for cross-component communication
         self.state_manager = get_state_manager()
@@ -333,7 +392,7 @@ class AdvancedArbitrageBot:
                     asks=[(Decimal(str(p)), Decimal(str(v))) for p, v in ob_data['asks'][:20]]
                 )
 
-                # Store in-memory (lock-free: dict assignment is atomic in CPython)
+                # Store in-memory (atomic within asyncio's single-threaded event loop)
                 self._latest_orderbooks[(exchange_name, symbol)] = orderbook
 
                 # Update price history for cointegration analysis
@@ -424,11 +483,14 @@ class AdvancedArbitrageBot:
         ]
         orderbooks = await asyncio.gather(*tasks, return_exceptions=True)
 
-        # Filter valid orderbooks
-        valid_orderbooks = [
-            ob for ob in orderbooks
-            if isinstance(ob, EnhancedOrderBook) and ob is not None
-        ]
+        # Filter valid orderbooks, logging any exceptions from failed fetches
+        valid_orderbooks = []
+        for ob in orderbooks:
+            if isinstance(ob, Exception):
+                logger.warning(f"Orderbook fetch failed for {symbol}: {ob}")
+                self.metrics.increment('orderbook_fetch_errors')
+            elif isinstance(ob, EnhancedOrderBook):
+                valid_orderbooks.append(ob)
 
         if len(valid_orderbooks) < 2:
             return None
@@ -655,7 +717,7 @@ class AdvancedArbitrageBot:
                 sortino_ratio=portfolio_risk.sortino_ratio,
                 var_95=Decimal(str(portfolio_risk.var_95)),
                 total_trades=portfolio_risk.total_trades,
-                successful_trades=portfolio_risk.winning_trades if hasattr(portfolio_risk, 'winning_trades') else 0
+                successful_trades=int(portfolio_risk.total_trades * portfolio_risk.win_rate)
             )
 
             # Record trade in state manager for dashboard
@@ -747,58 +809,72 @@ class AdvancedArbitrageBot:
         """Save opportunity and execution to database"""
         try:
             async with self.db_pool.acquire() as conn:
-                # Insert opportunity
-                opp_id = await conn.fetchval("""
+                # Use explicit transaction to ensure atomicity —
+                # if execution INSERT fails, opportunity INSERT is rolled back too
+                async with conn.transaction():
+                    # Insert opportunity (matches opportunities schema in models.py)
+                    spread_bps = Decimal(str(opportunity['spread_percent'])) * 100
+                    quantity = Decimal(str(opportunity['position_size'])) / Decimal(str(opportunity['buy_price']))
+                    opp_id = await conn.fetchval("""
                     INSERT INTO opportunities
-                    (detected_at, buy_exchange, sell_exchange, symbol,
-                     buy_price, sell_price, spread_percent, spread_bps,
-                     potential_profit_usd, estimated_profit_after_fees,
-                     buy_fee_percent, sell_fee_percent, slippage_estimate, executed)
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+                    (symbol, buy_exchange, sell_exchange,
+                     buy_price, sell_price, spread_bps,
+                     available_quantity, score, executed, discovered_at,
+                     metadata)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
                     RETURNING id
                 """,
-                    datetime.now(timezone.utc),
+                    opportunity['symbol'],
                     opportunity['buy_exchange'],
                     opportunity['sell_exchange'],
-                    opportunity['symbol'],
-                    float(opportunity['buy_price']),
-                    float(opportunity['sell_price']),
-                    float(opportunity['spread_percent']),
-                    float(opportunity['spread_percent'] * 100),
-                    float(opportunity['position_size'] * opportunity['net_spread']),
-                    float(result.net_profit),
-                    float(opportunity['buy_fee'] * 100),
-                    float(opportunity['sell_fee'] * 100),
-                    float((opportunity['buy_slippage'] + opportunity['sell_slippage']) * 100),
-                    True
+                    Decimal(str(opportunity['buy_price'])),
+                    Decimal(str(opportunity['sell_price'])),
+                    spread_bps,
+                    quantity,
+                    Decimal(str(score.composite_score)),
+                    True,
+                    datetime.now(timezone.utc),
+                    json.dumps({
+                        'buy_fee_percent': str(opportunity['buy_fee'] * 100),
+                        'sell_fee_percent': str(opportunity['sell_fee'] * 100),
+                        'slippage_estimate': str((opportunity['buy_slippage'] + opportunity['sell_slippage']) * 100),
+                        'net_spread': str(opportunity['net_spread']),
+                    })
                 )
 
-                # Insert execution
-                await conn.execute("""
-                    INSERT INTO executions
-                    (opportunity_id, started_at, completed_at, status, execution_time_ms,
-                     buy_exchange, buy_filled_amount, buy_avg_price, buy_fee,
-                     sell_exchange, sell_filled_amount, sell_avg_price, sell_fee,
-                     gross_profit_usd, net_profit_usd, profit_percent)
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
-                """,
-                    opp_id,
-                    result.buy_order.created_at,
-                    result.buy_order.updated_at,
-                    'completed',
-                    result.execution_time_ms,
-                    opportunity['buy_exchange'],
-                    float(result.buy_order.filled_amount),
-                    float(result.buy_order.avg_fill_price),
-                    float(result.buy_order.fee),
-                    opportunity['sell_exchange'],
-                    float(result.sell_order.filled_amount),
-                    float(result.sell_order.avg_fill_price),
-                    float(result.sell_order.fee),
-                    float(result.gross_profit),
-                    float(result.net_profit),
-                    float(opportunity['spread_percent'])
-                )
+                    # Insert execution (matches arbitrage_executions schema in models.py)
+                    buy_fee = Decimal(str(result.buy_order.fee))
+                    sell_fee = Decimal(str(result.sell_order.fee))
+                    await conn.execute("""
+                        INSERT INTO arbitrage_executions
+                        (symbol, buy_exchange, sell_exchange,
+                         buy_price, sell_price, spread_bps,
+                         quantity, gross_profit, total_fees, net_profit,
+                         success, total_execution_time_ms,
+                         completed_at, opportunity_id, metadata)
+                        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14::text, $15)
+                    """,
+                        opportunity['symbol'],
+                        opportunity['buy_exchange'],
+                        opportunity['sell_exchange'],
+                        Decimal(str(result.buy_order.avg_fill_price)),
+                        Decimal(str(result.sell_order.avg_fill_price)),
+                        spread_bps,
+                        Decimal(str(result.buy_order.filled_amount)),
+                        Decimal(str(result.gross_profit)),
+                        buy_fee + sell_fee,
+                        Decimal(str(result.net_profit)),
+                        True,
+                        result.execution_time_ms,
+                        datetime.now(timezone.utc),
+                        str(opp_id),
+                        json.dumps({
+                            'buy_filled_amount': str(result.buy_order.filled_amount),
+                            'sell_filled_amount': str(result.sell_order.filled_amount),
+                            'buy_fee': str(result.buy_order.fee),
+                            'sell_fee': str(result.sell_order.fee),
+                        })
+                    )
 
         except Exception as e:
             # Database persistence failure is serious - log with full context for investigation
@@ -819,20 +895,20 @@ class AdvancedArbitrageBot:
         """Continuously monitor one symbol, driven by WebSocket orderbook updates.
 
         Waits for the WS stream to signal new data (via asyncio.Event) instead of
-        polling with a fixed sleep interval. Falls back to a 2s timeout so we
-        still scan periodically even if the event is missed.
+        polling with a fixed sleep interval. Falls back to check_interval_seconds
+        timeout so we still scan periodically even if the event is missed.
         """
-        logger.info(f"👀 Monitoring {symbol} (event-driven)...")
+        check_interval = self.config.performance.get('check_interval_seconds', 2)
+        logger.info(f"👀 Monitoring {symbol} (event-driven, fallback {check_interval}s)...")
 
-        # Create event for this symbol — WS streams will set() it on each update
-        event = asyncio.Event()
-        self._orderbook_events[symbol] = event
+        # Use pre-created event (initialized in run() before streams start)
+        event = self._orderbook_events[symbol]
 
         while self.running:
             try:
-                # Wait for WS update or timeout after 2s (whichever comes first)
+                # Wait for WS update or timeout after check_interval (whichever comes first)
                 try:
-                    await asyncio.wait_for(event.wait(), timeout=2.0)
+                    await asyncio.wait_for(event.wait(), timeout=check_interval)
                 except asyncio.TimeoutError:
                     pass  # Scan anyway on timeout
                 event.clear()
@@ -890,6 +966,11 @@ class AdvancedArbitrageBot:
 
         tasks = []
 
+        # Pre-create events for all symbols BEFORE starting streams,
+        # so streams can signal monitors from the very first update.
+        for symbol in self.config.symbols:
+            self._orderbook_events[symbol] = asyncio.Event()
+
         # Start persistent WebSocket orderbook streams (1 per exchange/symbol pair)
         for exchange_name in self.exchanges:
             for symbol in self.config.symbols:
@@ -915,7 +996,11 @@ class AdvancedArbitrageBot:
         if self.antifragile:
             tasks.append(self._run_antifragile_adaptation())
 
-        await asyncio.gather(*tasks, return_exceptions=True)
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        # Log any top-level task failures (streams/monitors that crashed unexpectedly)
+        for i, result in enumerate(results):
+            if isinstance(result, Exception):
+                logger.error(f"Task {i} failed with unhandled exception: {result}", exc_info=result)
 
     async def _monitor_sentiment(self):
         """Monitor market sentiment and update state"""
@@ -963,12 +1048,37 @@ class AdvancedArbitrageBot:
                 adaptations = await self.antifragile.run_adaptation_cycle()
 
                 if adaptations:
-                    logger.info(f"🔄 Antifragile adaptations applied: {adaptations}")
+                    logger.info(f"🔄 Antifragile adaptations proposed: {adaptations}")
 
-                    # Update config with new parameters
+                    # Only allow mutation of tunable runtime parameters
+                    # (never mode, never the CLASS-LEVEL safety constants)
+                    TUNABLE_PARAMS = frozenset({
+                        'min_spread_percent', 'max_spread_percent',
+                        'max_position_usd', 'max_daily_loss_usd',
+                        'max_daily_trades', 'order_timeout_seconds',
+                        'max_slippage_bps',
+                    })
                     for param, value in adaptations.items():
-                        if hasattr(self.config.trading, param):
-                            setattr(self.config.trading, param, value)
+                        if param not in TUNABLE_PARAMS:
+                            logger.warning(
+                                f"Antifragile adaptation rejected: '{param}' is not a tunable parameter"
+                            )
+                            continue
+
+                        # Snapshot current value so we can rollback on validation failure
+                        old_value = getattr(self.config.trading, param)
+                        setattr(self.config.trading, param, value)
+                        try:
+                            # Re-run the full validation that __post_init__ performs
+                            self.config.trading.__post_init__()
+                            logger.info(f"  Applied: {param} = {value}")
+                        except Exception as validation_err:
+                            # Rollback to previous value
+                            setattr(self.config.trading, param, old_value)
+                            logger.warning(
+                                f"Antifragile adaptation rejected: {param}={value} "
+                                f"failed validation: {validation_err}"
+                            )
 
                 # Run stress test periodically
                 stress_results = await self.antifragile.run_stress_test()

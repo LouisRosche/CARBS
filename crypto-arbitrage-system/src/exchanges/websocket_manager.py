@@ -1,6 +1,11 @@
 """
 WebSocket Manager for Real-Time Exchange Data
 
+NOTE: This module is NOT used by the active trading system (advanced_main.py),
+which uses ccxt.pro's built-in ``watch_order_book()`` WebSocket API instead.
+Retained as a candidate for future integration if custom WebSocket handling
+is needed beyond what ccxt.pro provides.
+
 Production-grade WebSocket management:
 - Multi-exchange support
 - Automatic reconnection with backoff

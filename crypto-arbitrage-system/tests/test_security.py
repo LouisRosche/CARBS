@@ -716,6 +716,9 @@ class TestApprovalWorkflowRaceCondition:
             verified_2fa=True
         )
 
+        # Bypass the time_delay_minutes=5 waiting period for testing
+        request.executable_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+
         # Track execution attempts
         execution_count = 0
 
@@ -773,6 +776,9 @@ class TestApprovalWorkflowRaceCondition:
             reason="Approved",
             verified_2fa=True
         )
+
+        # Bypass the time_delay_minutes=5 waiting period for testing
+        request.executable_at = datetime.now(timezone.utc) - timedelta(seconds=1)
 
         async def failing_executor(details):
             raise Exception("Simulated failure")
