@@ -15,17 +15,15 @@ Research References:
 - Harris (2003): Market Microstructure
 """
 
-import asyncio
 from decimal import Decimal
 from typing import Dict, List, Optional, Tuple, Deque
 from dataclasses import dataclass, field
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 from collections import deque
 import logging
 import math
 
 import numpy as np
-from scipy import stats
 
 logger = logging.getLogger(__name__)
 

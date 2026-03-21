@@ -12,7 +12,7 @@ import os
 import time
 import secrets
 import logging
-from typing import Optional, Dict, Any
+from typing import Optional
 from datetime import datetime, timezone
 from contextlib import asynccontextmanager
 
@@ -31,12 +31,11 @@ except ImportError:
 from ..security.auth import AuthenticationManager, AuthError, TokenError
 from ..security.access_control import AccessControl, Permission, EmergencyControls
 from ..security.audit import get_audit_logger, AuditCategory
-from ..security.encryption import SecretsManager
-from .middleware import SecurityMiddleware, RateLimiter
+from .middleware import SecurityMiddleware, RateLimiter, TrustedProxyValidator
 
 # Import state manager for real-time data
 try:
-    from ..core.state_manager import StateManager, get_state_manager
+    from ..core.state_manager import get_state_manager
     STATE_MANAGER_AVAILABLE = True
 except ImportError:
     STATE_MANAGER_AVAILABLE = False
@@ -83,6 +82,26 @@ _emergency_controls: Optional[EmergencyControls] = None
 _security_middleware: Optional[SecurityMiddleware] = None
 _state_manager: Optional['StateManager'] = None
 _start_time: float = time.time()
+_proxy_validator: Optional[TrustedProxyValidator] = None
+
+
+def _get_client_ip(request: 'Request') -> str:
+    """Extract real client IP using trusted proxy validation."""
+    direct_ip = request.client.host if request.client else "unknown"
+    if _proxy_validator:
+        return _proxy_validator.get_real_client_ip(
+            direct_ip=direct_ip,
+            x_forwarded_for=request.headers.get("x-forwarded-for"),
+            x_real_ip=request.headers.get("x-real-ip")
+        )
+    return direct_ip
+
+
+# Maximum allowed limit for pagination queries (prevents memory exhaustion DoS)
+MAX_QUERY_LIMIT = 1000
+
+# Maximum length for free-text fields like reason strings
+MAX_REASON_LENGTH = 500
 
 
 def create_app() -> 'FastAPI':
@@ -95,7 +114,7 @@ def create_app() -> 'FastAPI':
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         """Application lifespan management"""
-        global _auth_manager, _access_control, _emergency_controls, _security_middleware, _state_manager, _start_time
+        global _auth_manager, _access_control, _emergency_controls, _security_middleware, _state_manager, _start_time, _proxy_validator
 
         logger.info("Starting CARBS API server...")
 
@@ -109,6 +128,7 @@ def create_app() -> 'FastAPI':
             audit_logger=get_audit_logger()
         )
         _start_time = time.time()
+        _proxy_validator = TrustedProxyValidator()
 
         # Initialize state manager for real-time data
         if STATE_MANAGER_AVAILABLE:
@@ -128,20 +148,31 @@ def create_app() -> 'FastAPI':
         audit = get_audit_logger()
         audit.shutdown()
 
+    # Disable OpenAPI/Swagger docs in production to prevent API surface enumeration
+    _is_production = os.getenv('CARBS_ENV', 'development').lower() == 'production'
     app = FastAPI(
         title="CARBS API",
         description="Crypto ARBitrage System - Secure Trading API",
         version="1.0.0",
-        docs_url="/api/docs",
-        redoc_url="/api/redoc",
-        openapi_url="/api/openapi.json",
+        docs_url=None if _is_production else "/api/docs",
+        redoc_url=None if _is_production else "/api/redoc",
+        openapi_url=None if _is_production else "/api/openapi.json",
         lifespan=lifespan
     )
 
     # CORS - restrictive by default
+    _cors_origins = [o.strip() for o in os.getenv('CORS_ORIGINS', '').split(',') if o.strip()]
+    # Block wildcard origin with credentials — this combination allows any site to make
+    # authenticated requests on behalf of a logged-in user (CSRF via CORS misconfiguration)
+    if '*' in _cors_origins:
+        logger.error(
+            "CORS_ORIGINS contains '*' which is unsafe with allow_credentials=True. "
+            "Falling back to empty origins (no cross-origin requests allowed)."
+        )
+        _cors_origins = []
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=os.getenv('CORS_ORIGINS', '').split(',') or [],
+        allow_origins=_cors_origins,
         allow_credentials=True,
         allow_methods=["GET", "POST", "PUT", "DELETE"],
         allow_headers=["Authorization", "Content-Type"],
@@ -192,7 +223,7 @@ def create_app() -> 'FastAPI':
         # Add security headers
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["X-Frame-Options"] = "DENY"
-        response.headers["X-XSS-Protection"] = "1; mode=block"
+        response.headers["X-XSS-Protection"] = "0"
         response.headers["Cache-Control"] = "no-store"
         response.headers["Content-Security-Policy"] = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'"
         response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
@@ -274,7 +305,7 @@ def _register_routes(app: 'FastAPI'):
         if not _auth_manager:
             raise HTTPException(status_code=503, detail="Service not ready")
 
-        ip = request.client.host if request.client else "unknown"
+        ip = _get_client_ip(request)
 
         try:
             session = _auth_manager.authenticate(
@@ -380,6 +411,7 @@ def _register_routes(app: 'FastAPI'):
     @app.get("/api/v1/trades/recent")
     async def get_recent_trades(limit: int = 20, session=Depends(get_current_user)):
         """Get recent trades"""
+        limit = max(1, min(limit, MAX_QUERY_LIMIT))
         if _state_manager:
             return {"trades": _state_manager.get_recent_trades(limit=limit)}
 
@@ -389,6 +421,7 @@ def _register_routes(app: 'FastAPI'):
     @app.get("/api/v1/opportunities/recent")
     async def get_recent_opportunities(limit: int = 20, session=Depends(get_current_user)):
         """Get recent opportunities"""
+        limit = max(1, min(limit, MAX_QUERY_LIMIT))
         if _state_manager:
             return {"opportunities": _state_manager.get_recent_opportunities(limit=limit)}
 
@@ -401,7 +434,13 @@ def _register_routes(app: 'FastAPI'):
         if not _emergency_controls or not _access_control:
             raise HTTPException(status_code=503, detail="Service not ready")
 
-        ip = request.client.host if request.client else "unknown"
+        # Sanitize reason: truncate length and strip control characters to prevent log injection
+        reason = reason[:MAX_REASON_LENGTH]
+        reason = ''.join(c for c in reason if c.isprintable())
+        if not reason:
+            raise HTTPException(status_code=400, detail="Reason must contain printable characters")
+
+        ip = _get_client_ip(request)
 
         # Check permission
         decision = _access_control.check_permission(
@@ -468,6 +507,7 @@ def _register_routes(app: 'FastAPI'):
         session=Depends(get_current_user)
     ):
         """Get audit logs"""
+        limit = max(1, min(limit, MAX_QUERY_LIMIT))
         # Check permission
         if _access_control:
             decision = _access_control.check_permission(

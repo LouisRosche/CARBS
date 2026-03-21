@@ -215,11 +215,3 @@ class TestConfidenceScore:
         assert 0 <= 0.0 <= 1
         assert 0 <= 0.5 <= 1
         assert 0 <= 1.0 <= 1
-
-
-class TestEngineIntegration:
-    """Integration tests for ArbitrageEngine
-
-    TODO: These tests require mocking the full engine config and exchange
-    connections. Implement when ArbitrageEngine constructor is stabilized.
-    """

@@ -14,8 +14,8 @@ Critical for production systems to prevent orphaned orders and positions.
 import asyncio
 import logging
 import signal
-from typing import Dict, Optional, List, Callable, Any
-from dataclasses import dataclass, field
+from typing import Dict, Optional, List, Callable
+from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
 from enum import Enum
 
@@ -382,9 +382,15 @@ class GracefulShutdownManager:
                         continue
 
                     free_balance = balance.get('free', 0)
-                    if isinstance(free_balance, str):
-                        from decimal import Decimal
-                        free_balance = Decimal(free_balance)
+                    try:
+                        if isinstance(free_balance, str):
+                            from decimal import Decimal
+                            free_balance = Decimal(free_balance)
+                        elif not isinstance(free_balance, (int, float)):
+                            free_balance = float(free_balance)
+                    except (ValueError, TypeError, ArithmeticError) as e:
+                        logger.warning(f"Non-numeric balance for {asset} on {exchange_name}: {e}")
+                        continue
 
                     # Skip negligible balances (less than $1 equivalent)
                     if free_balance <= 0:

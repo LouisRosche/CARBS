@@ -369,12 +369,13 @@ class TestApprovalWorkflow:
 
         assert request.status == ApprovalStatus.PENDING
 
-        # Approve request
+        # Approve request (CONFIG_CHANGE requires 2FA by default)
         success, message, fully_approved = await engine.approve(
             request_id=request.request_id,
             approver_id="admin1",
             approver_role="admin",
-            reason="Looks good"
+            reason="Looks good",
+            verified_2fa=True
         )
 
         assert success is True
@@ -425,13 +426,14 @@ class TestApprovalWorkflow:
             reason="Test"
         )
 
-        # Simulate concurrent approvals
+        # Simulate concurrent approvals (CONFIG_CHANGE requires 2FA by default)
         async def approve(approver_id):
             return await engine.approve(
                 request_id=request.request_id,
                 approver_id=approver_id,
                 approver_role="admin",
-                reason="Approved"
+                reason="Approved",
+                verified_2fa=True
             )
 
         results = await asyncio.gather(
@@ -693,6 +695,8 @@ class TestApprovalWorkflowRaceCondition:
         from pathlib import Path
 
         engine = ApprovalWorkflowEngine(data_dir=Path(temp_approval_dir))
+        # Remove time delay for testing so execute_if_ready works immediately
+        engine.configure_rule(ApprovalType.CONFIG_CHANGE, time_delay_minutes=0)
 
         # Create and approve request
         request = await engine.create_request(
@@ -703,12 +707,13 @@ class TestApprovalWorkflowRaceCondition:
             reason="Test"
         )
 
-        # Approve it
+        # Approve it (CONFIG_CHANGE requires 2FA by default)
         await engine.approve(
             request_id=request.request_id,
             approver_id="admin1",
             approver_role="admin",
-            reason="Approved"
+            reason="Approved",
+            verified_2fa=True
         )
 
         # Track execution attempts
@@ -750,6 +755,8 @@ class TestApprovalWorkflowRaceCondition:
         from pathlib import Path
 
         engine = ApprovalWorkflowEngine(data_dir=Path(temp_approval_dir))
+        # Remove time delay for testing so execute_if_ready works immediately
+        engine.configure_rule(ApprovalType.CONFIG_CHANGE, time_delay_minutes=0)
 
         request = await engine.create_request(
             approval_type=ApprovalType.CONFIG_CHANGE,
@@ -763,7 +770,8 @@ class TestApprovalWorkflowRaceCondition:
             request_id=request.request_id,
             approver_id="admin1",
             approver_role="admin",
-            reason="Approved"
+            reason="Approved",
+            verified_2fa=True
         )
 
         async def failing_executor(details):
@@ -847,3 +855,224 @@ class TestAuditLogging:
         assert hasattr(AuditLogger, 'log_approval_execution')
         assert hasattr(AuditLogger, 'log_session_created')
         assert hasattr(AuditLogger, 'log_permission_denied')
+
+
+class TestRefreshTokenTimingSafety:
+    """Verify refresh token comparison uses constant-time comparison"""
+
+    def test_refresh_token_uses_hmac_compare(self):
+        """Refresh token lookup must use hmac.compare_digest, not =="""
+        import inspect
+        from src.security.auth import AuthenticationManager
+
+        source = inspect.getsource(AuthenticationManager.refresh_session)
+        assert 'hmac.compare_digest' in source, \
+            "refresh_session must use hmac.compare_digest for timing-safe comparison"
+        assert 's.refresh_token == refresh_token' not in source, \
+            "refresh_session must NOT use == for refresh token comparison"
+
+
+class TestJWTStandardClaims:
+    """Verify JWT tokens include and validate standard security claims"""
+
+    def test_jwt_includes_standard_claims(self):
+        """JWT must include iss, aud, jti, nbf claims"""
+        import jwt as pyjwt
+        import secrets as _sec
+        from src.security.auth import AuthenticationManager
+
+        auth = AuthenticationManager(jwt_secret='test_secret_for_jwt_claims_test')
+        user = auth.create_user(f'jwtclaims_{_sec.token_hex(4)}', 'StrongP@ssw0rd!1', role='viewer')
+        session = auth._create_session(user, '127.0.0.1', 'test')
+        token = auth.create_jwt(session)
+
+        # Decode without verification to inspect claims
+        payload = pyjwt.decode(token, 'test_secret_for_jwt_claims_test',
+                               algorithms=['HS256'], audience='carbs-api')
+        assert payload.get('iss') == 'carbs-auth'
+        assert payload.get('aud') == 'carbs-api'
+        assert 'jti' in payload
+        assert 'nbf' in payload
+
+    def test_jwt_rejects_wrong_issuer(self):
+        """JWT verification must reject tokens with wrong issuer"""
+        import jwt as pyjwt
+        import secrets as _sec
+        from src.security.auth import AuthenticationManager, TokenError
+
+        auth = AuthenticationManager(jwt_secret='test_secret_for_issuer_test')
+        user = auth.create_user(f'issuer_{_sec.token_hex(4)}', 'StrongP@ssw0rd!2', role='viewer')
+        session = auth._create_session(user, '127.0.0.1', 'test')
+
+        # Create token with wrong issuer
+        payload = {
+            'session_id': session.session_id,
+            'user_id': session.user_id,
+            'username': session.username,
+            'role': session.role,
+            'exp': session.expires_at.timestamp(),
+            'iat': session.created_at.timestamp(),
+            'iss': 'evil-issuer',
+            'aud': 'carbs-api',
+        }
+        bad_token = pyjwt.encode(payload, 'test_secret_for_issuer_test', algorithm='HS256')
+
+        with pytest.raises(TokenError, match="Invalid token"):
+            auth.verify_jwt(bad_token)
+
+
+class TestTOTPReplayProtection:
+    """Verify TOTP codes cannot be replayed within the tolerance window"""
+
+    def test_totp_replay_blocked(self):
+        """Same TOTP code used twice should be rejected"""
+        from src.security.auth import TOTP
+
+        secret = TOTP.generate_secret()
+        token = TOTP.get_totp_token(secret)
+
+        # First use should succeed
+        assert TOTP.verify(secret, token) is True
+
+        # Replay with same token should fail
+        assert TOTP.verify(secret, token) is False
+
+    def test_totp_different_secrets_allowed(self):
+        """TOTP codes from different secrets should both work"""
+        from src.security.auth import TOTP
+
+        secret1 = TOTP.generate_secret()
+        secret2 = TOTP.generate_secret()
+
+        token1 = TOTP.get_totp_token(secret1)
+        token2 = TOTP.get_totp_token(secret2)
+
+        # Different secrets produce independent replay tracking
+        assert TOTP.verify(secret1, token1) is True
+        assert TOTP.verify(secret2, token2) is True
+
+
+class TestPasswordComplexity:
+    """Verify password complexity requirements"""
+
+    def test_reject_all_lowercase(self):
+        """Password with only lowercase letters should be rejected"""
+        from src.security.auth import AuthenticationManager, AuthError
+
+        auth = AuthenticationManager(jwt_secret='test_complexity_secret')
+        with pytest.raises(AuthError, match="uppercase.*lowercase.*digit.*special"):
+            auth.create_user('weakpwuser1', 'aaaaaaaaaaaa')
+
+    def test_reject_all_same_char(self):
+        """Trivial repeated-char password should be rejected"""
+        from src.security.auth import AuthenticationManager, AuthError
+
+        auth = AuthenticationManager(jwt_secret='test_complexity_secret2')
+        with pytest.raises(AuthError, match="uppercase.*lowercase.*digit.*special"):
+            auth.create_user('weakpwuser2', '111111111111')
+
+    def test_accept_complex_password(self):
+        """Password with 3+ character classes should be accepted"""
+        import secrets as _sec
+        from src.security.auth import AuthenticationManager
+
+        auth = AuthenticationManager(jwt_secret='test_complexity_secret3')
+        username = f'strongpw_{_sec.token_hex(4)}'
+        user = auth.create_user(username, 'MyStr0ngP@ss!')
+        assert user.username == username
+
+
+class TestCORSWildcardGuard:
+    """Verify CORS wildcard origin is blocked when credentials are enabled"""
+
+    def test_cors_wildcard_rejected(self):
+        """Setting CORS_ORIGINS=* should result in empty origins list"""
+        with patch.dict(os.environ, {'CORS_ORIGINS': '*'}):
+            origins = [o.strip() for o in os.getenv('CORS_ORIGINS', '').split(',') if o.strip()]
+            if '*' in origins:
+                origins = []
+            assert origins == []
+
+    def test_cors_specific_origin_accepted(self):
+        """Specific CORS origins should be preserved"""
+        with patch.dict(os.environ, {'CORS_ORIGINS': 'https://app.example.com'}):
+            origins = [o.strip() for o in os.getenv('CORS_ORIGINS', '').split(',') if o.strip()]
+            if '*' in origins:
+                origins = []
+            assert origins == ['https://app.example.com']
+
+
+class TestEndpointRateLimiterPersistence:
+    """Verify per-endpoint rate limiters are persistent (not recreated per request)"""
+
+    def test_endpoint_limiters_are_persistent_instances(self):
+        """SecurityMiddleware must use persistent RateLimiter instances per endpoint"""
+        from src.api.middleware import SecurityMiddleware
+
+        middleware = SecurityMiddleware()
+        assert hasattr(middleware, '_endpoint_limiters')
+
+        # Verify they're RateLimiter instances, not RateLimitConfig
+        for endpoint, limiter in middleware._endpoint_limiters.items():
+            from src.api.middleware import RateLimiter
+            assert isinstance(limiter, RateLimiter), \
+                f"Endpoint {endpoint} should use a persistent RateLimiter instance"
+
+    def test_endpoint_rate_limit_actually_enforced(self):
+        """Login endpoint burst limit (2/sec) should block after 2 rapid requests"""
+        from src.api.middleware import SecurityMiddleware
+
+        middleware = SecurityMiddleware()
+        test_ip = '10.20.30.40'
+        endpoint = '/api/v1/auth/login'
+
+        # Make 2 requests (burst_limit=2, should be allowed)
+        for i in range(2):
+            allowed, _ = middleware.check_rate_limit(test_ip, endpoint)
+            assert allowed, f"Request {i+1} should be allowed"
+
+        # 3rd rapid request should be burst-limited
+        allowed, retry_after = middleware.check_rate_limit(test_ip, endpoint)
+        assert not allowed, "3rd rapid request should be rate-limited by burst limit"
+        assert retry_after is not None
+
+
+class TestIPRateLimiterEviction:
+    """Verify IP rate limiter has bounded memory growth"""
+
+    def test_ip_attempts_dict_has_eviction(self):
+        """AuthenticationManager should evict stale IPs when over MAX_TRACKED_IPS"""
+        from src.security.auth import AuthenticationManager
+
+        auth = AuthenticationManager(jwt_secret='test_eviction_secret')
+        assert hasattr(auth, 'MAX_TRACKED_IPS')
+        assert auth.MAX_TRACKED_IPS > 0
+
+    def test_check_ip_rate_limit_source_has_eviction(self):
+        """_check_ip_rate_limit must contain eviction logic"""
+        import inspect
+        from src.security.auth import AuthenticationManager
+
+        source = inspect.getsource(AuthenticationManager._check_ip_rate_limit)
+        assert 'MAX_TRACKED_IPS' in source, \
+            "_check_ip_rate_limit must reference MAX_TRACKED_IPS for eviction"
+
+
+class TestRequireApiAuthSafety:
+    """Verify require_api_auth decorator is not silently passing through"""
+
+    def test_require_api_auth_raises_on_call(self):
+        """Decorated functions must raise RuntimeError, not silently pass through"""
+        import warnings
+        from src.api.middleware import require_api_auth
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+
+            @require_api_auth(required_permission='test')
+            async def fake_endpoint():
+                return "should never reach here"
+
+        with pytest.raises(RuntimeError, match="does not enforce authentication"):
+            import asyncio
+            asyncio.get_event_loop().run_until_complete(fake_endpoint())

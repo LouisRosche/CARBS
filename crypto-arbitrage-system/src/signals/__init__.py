@@ -33,6 +33,7 @@ from .clients import CoinMarketCapClient, CryptoCompareClient
 from .aggregator import SentimentAggregator
 from .generator import SignalGenerator
 from .service import SignalService, create_signal_service
+from .manager import SignalManager
 
 
 __all__ = [
@@ -54,6 +55,7 @@ __all__ = [
     "SentimentAggregator",
     "SignalGenerator",
     "SignalService",
+    "SignalManager",
 
     # Factory
     "create_signal_service",

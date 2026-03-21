@@ -474,7 +474,7 @@ class SecurityMiddleware:
     SECURITY_HEADERS = {
         'X-Content-Type-Options': 'nosniff',
         'X-Frame-Options': 'DENY',
-        'X-XSS-Protection': '1; mode=block',
+        'X-XSS-Protection': '0',  # Disabled; CSP provides XSS protection. '1; mode=block' is deprecated and unsafe in older IE
         'Strict-Transport-Security': 'max-age=31536000; includeSubDomains; preload',
         'Content-Security-Policy': "default-src 'self'",
         'Cache-Control': 'no-store',
@@ -546,18 +546,18 @@ class SecurityMiddleware:
             else os.getenv('REQUIRE_SIGNED_REQUESTS', 'false').lower() == 'true'
         )
 
-        # Per-endpoint rate limits
-        self.endpoint_limits: Dict[str, RateLimitConfig] = {
-            '/api/v1/auth/login': RateLimitConfig(
+        # Per-endpoint rate limiters (persistent instances, not recreated per request)
+        self._endpoint_limiters: Dict[str, RateLimiter] = {
+            '/api/v1/auth/login': RateLimiter(RateLimitConfig(
                 requests_per_minute=5,
                 requests_per_hour=20,
                 burst_limit=2
-            ),
-            '/api/v1/trade/execute': RateLimitConfig(
+            )),
+            '/api/v1/trade/execute': RateLimiter(RateLimitConfig(
                 requests_per_minute=10,
                 requests_per_hour=100,
                 burst_limit=3
-            )
+            )),
         }
 
     def check_ip_allowed(self, ip_address: str) -> tuple:
@@ -582,9 +582,9 @@ class SecurityMiddleware:
         Returns:
             (allowed: bool, retry_after: Optional[int])
         """
-        # Use endpoint-specific limiter if configured
-        if endpoint in self.endpoint_limits:
-            limiter = RateLimiter(self.endpoint_limits[endpoint])
+        # Use persistent endpoint-specific limiter if configured
+        if endpoint in self._endpoint_limiters:
+            limiter = self._endpoint_limiters[endpoint]
         else:
             limiter = self.rate_limiter
 
@@ -764,22 +764,32 @@ class SecurityMiddleware:
 
 def require_api_auth(required_permission=None):
     """
-    Decorator for API endpoints requiring authentication
+    Decorator for API endpoints requiring authentication.
+
+    WARNING: This decorator is NOT implemented for FastAPI routes.
+    Use FastAPI's Depends(get_current_user) instead.
+
+    This will raise RuntimeError at import time to prevent silent auth bypass.
 
     Args:
         required_permission: Optional permission to check
-
-    Usage:
-        @require_api_auth(Permission.TRADE_EXECUTE)
-        async def execute_trade(request):
-            ...
     """
+    import warnings
+
     def decorator(func: Callable):
         @functools.wraps(func)
         async def wrapper(*args, **kwargs):
-            # This would integrate with the web framework (FastAPI, etc.)
-            # For now, just call the function
-            return await func(*args, **kwargs)
+            raise RuntimeError(
+                f"require_api_auth decorator on '{func.__name__}' does not enforce authentication. "
+                f"Use FastAPI Depends(get_current_user) for auth and check permissions explicitly."
+            )
+        # Warn at decoration time so usage is caught during testing
+        warnings.warn(
+            f"require_api_auth on '{func.__name__}' is a no-op. "
+            f"Use FastAPI Depends(get_current_user) instead.",
+            UserWarning,
+            stacklevel=3
+        )
         return wrapper
     return decorator
 
