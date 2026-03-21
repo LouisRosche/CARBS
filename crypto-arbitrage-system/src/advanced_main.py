@@ -10,7 +10,9 @@ Integrates:
 """
 
 import asyncio
+import json
 import logging
+import logging.handlers
 import signal
 import sys
 from pathlib import Path
@@ -71,21 +73,72 @@ try:
 except ImportError:
     COMPLIANCE_AVAILABLE = False
 
-# Ensure log directory exists
-log_dir = Path('data/logs')
-log_dir.mkdir(parents=True, exist_ok=True)
-
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.StreamHandler(sys.stdout),
-        logging.FileHandler(log_dir / 'arbitrage.log')
-    ]
-)
-
+# Placeholder logger — reconfigured in setup_logging() once config is loaded
 logger = logging.getLogger(__name__)
+
+
+class _JSONFormatter(logging.Formatter):
+    """Structured JSON log formatter for machine-readable output."""
+
+    def format(self, record: logging.LogRecord) -> str:
+        log_entry = {
+            "ts": self.formatTime(record, self.datefmt),
+            "level": record.levelname,
+            "logger": record.name,
+            "msg": record.getMessage(),
+        }
+        if record.exc_info and record.exc_info[0] is not None:
+            log_entry["exception"] = self.formatException(record.exc_info)
+        return json.dumps(log_entry, default=str)
+
+
+def setup_logging(config_logging: dict) -> None:
+    """Configure logging from config.yaml's ``logging`` section.
+
+    Supports:
+    - ``level``: DEBUG / INFO / WARNING / ERROR / CRITICAL
+    - ``format``: ``json`` for structured output, anything else for text
+    - ``file_enabled``: whether to write to disk
+    - ``file_path``: log file location (relative OK)
+    - ``max_file_size_mb``: per-file size cap before rotation
+    - ``backup_count``: number of rotated files to keep
+    """
+    level_name = config_logging.get("level", "INFO").upper()
+    level = getattr(logging, level_name, logging.INFO)
+
+    fmt = config_logging.get("format", "text")
+    if fmt == "json":
+        formatter = _JSONFormatter()
+    else:
+        formatter = logging.Formatter(
+            "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+        )
+
+    # Build handler list
+    handlers: list[logging.Handler] = [logging.StreamHandler(sys.stdout)]
+
+    if config_logging.get("file_enabled", True):
+        log_path = Path(config_logging.get("file_path", "data/logs/arbitrage.log"))
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        max_bytes = int(config_logging.get("max_file_size_mb", 100)) * 1024 * 1024
+        backup_count = int(config_logging.get("backup_count", 5))
+        handlers.append(
+            logging.handlers.RotatingFileHandler(
+                log_path,
+                maxBytes=max_bytes,
+                backupCount=backup_count,
+            )
+        )
+
+    # Apply to root logger
+    root = logging.getLogger()
+    root.setLevel(level)
+    # Remove any pre-existing handlers (e.g. from basicConfig)
+    for h in root.handlers[:]:
+        root.removeHandler(h)
+    for h in handlers:
+        h.setFormatter(formatter)
+        root.addHandler(h)
 
 
 class AdvancedArbitrageBot:
@@ -144,6 +197,10 @@ class AdvancedArbitrageBot:
         except ConfigValidationError as e:
             logger.error(f"Invalid configuration: {e}")
             raise SystemExit(1)
+
+        # Apply logging config (RotatingFileHandler, level, format) now that config is loaded
+        logging_cfg = getattr(self.config, 'logging', None) or {}
+        setup_logging(logging_cfg)
 
         # Initialize state manager first for cross-component communication
         self.state_manager = get_state_manager()
@@ -822,10 +879,11 @@ class AdvancedArbitrageBot:
         """Continuously monitor one symbol, driven by WebSocket orderbook updates.
 
         Waits for the WS stream to signal new data (via asyncio.Event) instead of
-        polling with a fixed sleep interval. Falls back to a 2s timeout so we
-        still scan periodically even if the event is missed.
+        polling with a fixed sleep interval. Falls back to check_interval_seconds
+        timeout so we still scan periodically even if the event is missed.
         """
-        logger.info(f"👀 Monitoring {symbol} (event-driven)...")
+        check_interval = self.config.performance.get('check_interval_seconds', 2)
+        logger.info(f"👀 Monitoring {symbol} (event-driven, fallback {check_interval}s)...")
 
         # Create event for this symbol — WS streams will set() it on each update
         event = asyncio.Event()
@@ -833,9 +891,9 @@ class AdvancedArbitrageBot:
 
         while self.running:
             try:
-                # Wait for WS update or timeout after 2s (whichever comes first)
+                # Wait for WS update or timeout after check_interval (whichever comes first)
                 try:
-                    await asyncio.wait_for(event.wait(), timeout=2.0)
+                    await asyncio.wait_for(event.wait(), timeout=check_interval)
                 except asyncio.TimeoutError:
                     pass  # Scan anyway on timeout
                 event.clear()

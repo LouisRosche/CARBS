@@ -380,19 +380,19 @@ def _register_routes(app: 'FastAPI'):
     @app.get("/api/v1/trades/recent")
     async def get_recent_trades(limit: int = 20, session=Depends(get_current_user)):
         """Get recent trades"""
-        if _state_manager:
-            return {"trades": _state_manager.get_recent_trades(limit=limit)}
-
-        return {"trades": []}
+        if not _state_manager:
+            logger.warning("GET /api/v1/trades/recent called but state_manager unavailable")
+            raise HTTPException(status_code=503, detail="State manager not available")
+        return {"trades": _state_manager.get_recent_trades(limit=limit)}
 
     # Recent opportunities endpoint
     @app.get("/api/v1/opportunities/recent")
     async def get_recent_opportunities(limit: int = 20, session=Depends(get_current_user)):
         """Get recent opportunities"""
-        if _state_manager:
-            return {"opportunities": _state_manager.get_recent_opportunities(limit=limit)}
-
-        return {"opportunities": []}
+        if not _state_manager:
+            logger.warning("GET /api/v1/opportunities/recent called but state_manager unavailable")
+            raise HTTPException(status_code=503, detail="State manager not available")
+        return {"opportunities": _state_manager.get_recent_opportunities(limit=limit)}
 
     # Emergency controls
     @app.post("/api/v1/emergency/stop")

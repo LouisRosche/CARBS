@@ -121,7 +121,7 @@ class TestOrderbookProcessing:
         assert Decimal('0') <= result <= Decimal('0.02')
 
         # Check latency
-        stats = benchmark.stats
+        stats = benchmark.stats.stats if hasattr(benchmark.stats, 'stats') else benchmark.stats
         assert stats.mean < SLIPPAGE_ESTIMATION_THRESHOLD, \
             f"Slippage estimation took {stats.mean*1000:.2f}ms (threshold: {SLIPPAGE_ESTIMATION_THRESHOLD*1000}ms)"
 
@@ -154,7 +154,7 @@ class TestOpportunityDetection:
         assert len(result) >= 0  # May or may not find opportunities
 
         # Check latency
-        stats = benchmark.stats
+        stats = benchmark.stats.stats if hasattr(benchmark.stats, 'stats') else benchmark.stats
         assert stats.mean < SPREAD_CALCULATION_THRESHOLD, \
             f"Spread calculation took {stats.mean*1000:.2f}ms (threshold: {SPREAD_CALCULATION_THRESHOLD*1000}ms)"
 
@@ -206,7 +206,7 @@ class TestOpportunityDetection:
         assert isinstance(result, list)
 
         # Check latency
-        stats = benchmark.stats
+        stats = benchmark.stats.stats if hasattr(benchmark.stats, 'stats') else benchmark.stats
         assert stats.mean < OPPORTUNITY_DETECTION_THRESHOLD, \
             f"Opportunity detection took {stats.mean*1000:.2f}ms (threshold: {OPPORTUNITY_DETECTION_THRESHOLD*1000}ms)"
 
@@ -291,7 +291,7 @@ class TestEndToEndPipeline:
         assert isinstance(result, list)
 
         # Check latency - CRITICAL for arbitrage profitability
-        stats = benchmark.stats
+        stats = benchmark.stats.stats if hasattr(benchmark.stats, 'stats') else benchmark.stats
         assert stats.mean < END_TO_END_THRESHOLD, \
             f"❌ END-TO-END LATENCY CRITICAL: {stats.mean*1000:.2f}ms (threshold: {END_TO_END_THRESHOLD*1000}ms)\n" \
             f"   Arbitrage opportunities disappear quickly. System must process faster."
@@ -304,8 +304,7 @@ class TestEndToEndPipeline:
 class TestConcurrentProcessing:
     """Benchmark concurrent orderbook processing"""
 
-    @pytest.mark.asyncio
-    async def test_concurrent_orderbook_fetch_simulation(self, benchmark):
+    def test_concurrent_orderbook_fetch_simulation(self, benchmark):
         """
         Benchmark concurrent orderbook processing from multiple exchanges
 
@@ -344,7 +343,7 @@ class TestConcurrentProcessing:
 
             return processed
 
-        # Benchmark async function
+        # Benchmark async function via new event loop
         def run_async():
             return asyncio.run(simulate_fetch_and_process())
 
@@ -353,7 +352,7 @@ class TestConcurrentProcessing:
 
         # Concurrent processing should be faster than sequential (5 * 1ms = 5ms sequential)
         # With concurrency, should be close to 1ms + processing overhead
-        stats = benchmark.stats
+        stats = benchmark.stats.stats if hasattr(benchmark.stats, 'stats') else benchmark.stats
         print(f"\n✅ Concurrent Processing (5 exchanges): {stats.mean*1000:.2f}ms")
 
 

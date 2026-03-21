@@ -620,12 +620,13 @@ class ApprovalWorkflowEngine:
         self,
         request_id: str,
         canceller_id: str,
-        reason: str
+        reason: str,
+        canceller_role: str = ""
     ) -> tuple:
         """
         Cancel a pending request
 
-        Only the requester or admin can cancel.
+        Only the requester or an admin/super_admin can cancel.
         """
         async with self._lock:
             request = self._pending_requests.get(request_id)
@@ -636,9 +637,10 @@ class ApprovalWorkflowEngine:
                 return False, f"Request is {request.status.value}"
 
             if canceller_id != request.requester_id:
-                # Check if admin
-                # For now, allow any cancellation with reason
-                pass
+                # Only admins/super_admins can cancel other users' requests
+                rule = self._rules.get(request.approval_type)
+                if rule and canceller_role not in rule.required_roles:
+                    return False, f"Role {canceller_role} cannot cancel this request"
 
             request.status = ApprovalStatus.CANCELLED
             self._save_state()

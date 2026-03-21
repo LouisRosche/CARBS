@@ -369,12 +369,13 @@ class TestApprovalWorkflow:
 
         assert request.status == ApprovalStatus.PENDING
 
-        # Approve request
+        # Approve request (verified_2fa required by default rule)
         success, message, fully_approved = await engine.approve(
             request_id=request.request_id,
             approver_id="admin1",
             approver_role="admin",
-            reason="Looks good"
+            reason="Looks good",
+            verified_2fa=True
         )
 
         assert success is True
@@ -431,7 +432,8 @@ class TestApprovalWorkflow:
                 request_id=request.request_id,
                 approver_id=approver_id,
                 approver_role="admin",
-                reason="Approved"
+                reason="Approved",
+                verified_2fa=True
             )
 
         results = await asyncio.gather(
@@ -703,13 +705,17 @@ class TestApprovalWorkflowRaceCondition:
             reason="Test"
         )
 
-        # Approve it
+        # Approve it (verified_2fa required by default rule)
         await engine.approve(
             request_id=request.request_id,
             approver_id="admin1",
             approver_role="admin",
-            reason="Approved"
+            reason="Approved",
+            verified_2fa=True
         )
+
+        # Bypass the time_delay_minutes=5 waiting period for testing
+        request.executable_at = datetime.now(timezone.utc) - timedelta(seconds=1)
 
         # Track execution attempts
         execution_count = 0
@@ -763,8 +769,12 @@ class TestApprovalWorkflowRaceCondition:
             request_id=request.request_id,
             approver_id="admin1",
             approver_role="admin",
-            reason="Approved"
+            reason="Approved",
+            verified_2fa=True
         )
+
+        # Bypass the time_delay_minutes=5 waiting period for testing
+        request.executable_at = datetime.now(timezone.utc) - timedelta(seconds=1)
 
         async def failing_executor(details):
             raise Exception("Simulated failure")
