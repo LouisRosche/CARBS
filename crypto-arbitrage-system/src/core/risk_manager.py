@@ -439,10 +439,10 @@ class RiskManager:
             max_fraction=self.kelly_max_fraction
         )
 
-        # Apply constraints
+        # Apply constraints — use configurable Kelly max fraction (not hardcoded)
         max_size = min(
             self.max_position_usd,
-            self.current_capital * Decimal('0.10')  # Max 10% of capital
+            self.current_capital * Decimal(str(self.kelly_max_fraction))
         )
 
         recommended_size = min(kelly_size, max_size)

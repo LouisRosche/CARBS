@@ -143,6 +143,7 @@ class AntifragileCore:
         self.daily_trades = 0
         self.consecutive_losses = 0
         self.last_trade_time: datetime = None
+        self._current_trading_day: str = datetime.now(timezone.utc).date().isoformat()
 
         # Load state
         self._load_state()
@@ -379,9 +380,11 @@ class AntifragileCore:
                 # Simplified Kelly: f = W - (1-W)/R where W=win rate, R=win/loss ratio
                 win_loss_ratio = float(perf.avg_win / perf.avg_loss) if perf.avg_loss > 0 else 1
                 kelly = perf.win_rate - (1 - perf.win_rate) / win_loss_ratio
+                # Apply quarter-Kelly safety factor (matches RiskManager convention)
+                kelly *= 0.25
                 kelly = max(0, min(self.kelly_max_fraction, kelly))  # Cap at configured max
                 adjusted_size = float(self.current_capital) * kelly
-                decision["reasons"].append(f"Kelly sizing: {kelly:.1%}")
+                decision["reasons"].append(f"Kelly sizing (quarter-Kelly): {kelly:.1%}")
 
         # Cap at max position size (configurable Kelly max fraction)
         max_size = float(self.current_capital) * self.kelly_max_fraction
@@ -399,8 +402,35 @@ class AntifragileCore:
 
         return decision
 
+    def _maybe_reset_daily_counters(self):
+        """Automatically reset daily counters when a new UTC day begins."""
+        today = datetime.now(timezone.utc).date().isoformat()
+        if today != self._current_trading_day:
+            logger.info(
+                f"New trading day detected ({self._current_trading_day} -> {today}). "
+                f"Resetting daily counters (loss={self.daily_loss}, trades={self.daily_trades})."
+            )
+            self.daily_pnl.append({
+                "date": self._current_trading_day,
+                "pnl": str(self.daily_loss),
+                "trades": self.daily_trades
+            })
+            self.daily_loss = Decimal("0")
+            self.daily_trades = 0
+            self._current_trading_day = today
+
+            # Exit halted state on new day if it was triggered by daily limits
+            if self.state == SystemState.HALTED:
+                self.state = SystemState.CAUTIOUS
+                logger.info("System moved from HALTED to CAUTIOUS on new trading day")
+
+            self._save_state()
+
     def _check_circuit_breakers(self) -> Dict:
         """Check all circuit breakers"""
+        # Auto-reset daily counters if new day
+        self._maybe_reset_daily_counters()
+
         # Daily loss limit
         if self.daily_loss < -float(self.current_capital) * self.params.max_drawdown_halt:
             return {

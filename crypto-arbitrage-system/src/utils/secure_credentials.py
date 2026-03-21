@@ -23,7 +23,7 @@ from typing import Dict, Optional
 
 logger = logging.getLogger(__name__)
 
-# Try to import cryptography, fall back to obfuscation if unavailable
+# cryptography is a HARD requirement for a financial trading system
 try:
     from cryptography.fernet import Fernet
     from cryptography.hazmat.primitives import hashes
@@ -31,7 +31,11 @@ try:
     CRYPTO_AVAILABLE = True
 except ImportError:
     CRYPTO_AVAILABLE = False
-    logger.warning("cryptography package not installed - using basic obfuscation only")
+    logger.critical(
+        "FATAL: 'cryptography' package not installed. "
+        "Credential encryption is REQUIRED for this trading system. "
+        "Install with: pip install cryptography"
+    )
 
 
 def _get_machine_entropy() -> bytes:
@@ -64,18 +68,20 @@ def _get_machine_entropy() -> bytes:
 
 def _derive_key(salt: bytes) -> bytes:
     """Derive encryption key from salt using PBKDF2."""
-    if CRYPTO_AVAILABLE:
-        kdf = PBKDF2HMAC(
-            algorithm=hashes.SHA256(),
-            length=32,
-            salt=salt,
-            iterations=100000,  # High iteration count for security
+    if not CRYPTO_AVAILABLE:
+        raise RuntimeError(
+            "cryptography package is required but not installed. "
+            "Cannot store credentials without proper encryption. "
+            "Install with: pip install cryptography"
         )
-        # Use machine entropy as password
-        return base64.urlsafe_b64encode(kdf.derive(_get_machine_entropy()))
-    else:
-        # Fallback: simple XOR-based obfuscation (NOT secure, but better than plaintext)
-        return hashlib.sha256(salt + _get_machine_entropy()).digest()
+    kdf = PBKDF2HMAC(
+        algorithm=hashes.SHA256(),
+        length=32,
+        salt=salt,
+        iterations=600000,  # NIST SP 800-132 recommended minimum for PBKDF2-SHA256
+    )
+    # Use machine entropy as password
+    return base64.urlsafe_b64encode(kdf.derive(_get_machine_entropy()))
 
 
 @dataclass
@@ -146,19 +152,10 @@ class SecureCredentialStore:
         # Generate unique salt for this credential
         salt = secrets.token_bytes(16)
 
-        if CRYPTO_AVAILABLE:
-            # Derive key and encrypt
-            derived_key = _derive_key(self._master_salt + salt)
-            fernet = Fernet(derived_key)
-            ciphertext = fernet.encrypt(value.encode('utf-8'))
-        else:
-            # Fallback obfuscation (XOR with derived key)
-            derived_key = _derive_key(self._master_salt + salt)
-            value_bytes = value.encode('utf-8')
-            ciphertext = bytes(
-                v ^ derived_key[i % len(derived_key)]
-                for i, v in enumerate(value_bytes)
-            )
+        # Derive key and encrypt with Fernet (cryptography package required)
+        derived_key = _derive_key(self._master_salt + salt)
+        fernet = Fernet(derived_key)
+        ciphertext = fernet.encrypt(value.encode('utf-8'))
 
         with self._lock:
             self._credentials[key] = EncryptedCredential(
@@ -189,23 +186,14 @@ class SecureCredentialStore:
 
             cred = self._credentials[key]
 
-        if CRYPTO_AVAILABLE:
-            derived_key = _derive_key(self._master_salt + cred.salt)
-            fernet = Fernet(derived_key)
-            try:
-                plaintext = fernet.decrypt(cred.ciphertext)
-                return plaintext.decode('utf-8')
-            except Exception as e:
-                logger.error(f"Failed to decrypt credential {key}: {e}")
-                return None
-        else:
-            # Fallback de-obfuscation
-            derived_key = _derive_key(self._master_salt + cred.salt)
-            plaintext = bytes(
-                c ^ derived_key[i % len(derived_key)]
-                for i, c in enumerate(cred.ciphertext)
-            )
+        derived_key = _derive_key(self._master_salt + cred.salt)
+        fernet = Fernet(derived_key)
+        try:
+            plaintext = fernet.decrypt(cred.ciphertext)
             return plaintext.decode('utf-8')
+        except Exception as e:
+            logger.error(f"Failed to decrypt credential {key}: {e}")
+            return None
 
     def delete(self, key: str) -> bool:
         """
