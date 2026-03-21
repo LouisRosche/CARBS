@@ -19,13 +19,12 @@ Research References:
 import asyncio
 from decimal import Decimal
 from typing import Dict, List, Optional, Deque, Tuple
-from dataclasses import dataclass, field
-from datetime import datetime, timezone, timedelta
+from dataclasses import dataclass
+from datetime import datetime, timezone
 from collections import deque
 import logging
 
 import numpy as np
-from scipy import stats
 
 logger = logging.getLogger(__name__)
 

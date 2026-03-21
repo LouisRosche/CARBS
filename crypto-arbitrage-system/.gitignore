@@ -20,6 +20,9 @@ build/
 data/logs/
 data/historical/
 data/state/
+data/.key_salt
+data/.jwt_secret
+data/.users.json
 backups/
 
 # Binary archives

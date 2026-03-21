@@ -17,6 +17,8 @@ import logging
 from typing import Optional
 from pathlib import Path
 
+import yaml
+
 logger = logging.getLogger(__name__)
 
 
@@ -342,28 +344,76 @@ Examples:
         print(f"\nStarting CARBS in {args.mode} mode...")
         print(f"Config: {args.config}")
 
-        # This would launch the actual bot
         if args.mode == 'live':
             confirm = input("\n⚠ LIVE TRADING - Enter 'CONFIRM' to proceed: ")
             if confirm != 'CONFIRM':
                 print("Aborted")
                 return
 
-        print("\nBot would start here...")
-        print("(Use 'carbs stop' to stop)")
+        try:
+            from ..advanced_main import AdvancedArbitrageBot
+        except ImportError:
+            print("Error: Could not import AdvancedArbitrageBot. Check installation.")
+            return
+
+        # Write PID file for stop/status commands
+        pid_file = Path('data/.bot.pid')
+        pid_file.parent.mkdir(parents=True, exist_ok=True)
+        pid_file.write_text(str(os.getpid()))
+
+        # Remove any stale stop signal
+        stop_file = Path('data/.stop_signal')
+        if stop_file.exists():
+            stop_file.unlink()
+
+        try:
+            bot = AdvancedArbitrageBot()
+            await bot.run()
+        except KeyboardInterrupt:
+            print("\nShutting down...")
+        finally:
+            if pid_file.exists():
+                pid_file.unlink()
 
     async def _handle_stop(self, args):
-        """Stop trading bot"""
-        print("\nStopping CARBS...")
-        # This would send stop signal to running bot
-        print("Stop signal sent")
+        """Stop trading bot by writing a stop signal file"""
+        stop_file = Path('data/.stop_signal')
+        pid_file = Path('data/.bot.pid')
+
+        if not pid_file.exists():
+            print("\nBot does not appear to be running (no PID file)")
+            return
+
+        stop_file.parent.mkdir(parents=True, exist_ok=True)
+        stop_file.write_text("stop")
+        print("\nStop signal sent. Bot will shut down gracefully.")
 
     async def _handle_status(self, args):
-        """Show quick status"""
+        """Show quick status from PID file and state manager"""
         print("\n=== CARBS Status ===")
-        print("Status: Stopped")
-        print("Mode: Paper")
-        print("Last run: Never")
+
+        pid_file = Path('data/.bot.pid')
+        if pid_file.exists():
+            pid = pid_file.read_text().strip()
+            # Check if process is actually running
+            try:
+                os.kill(int(pid), 0)
+                print(f"Status: Running (PID {pid})")
+            except (OSError, ValueError):
+                print("Status: Stale PID file (bot not running)")
+                pid_file.unlink(missing_ok=True)
+        else:
+            print("Status: Stopped")
+
+        try:
+            from ..core.state_manager import get_state_manager
+            sm = get_state_manager()
+            state = sm.get_engine_state()
+            print(f"Mode: {state.trading_mode}")
+            print(f"Active Since: {state.start_time}")
+        except Exception:
+            print("Mode: Unknown (state manager unavailable)")
+
         print("\nUse 'carbs dashboard' for full status")
 
     async def _handle_creds(self, args):
@@ -528,186 +578,244 @@ Examples:
 
 
     async def _handle_balance(self, args):
-        """View balances"""
+        """View balances from state manager"""
         print("\n=== Account Balances ===\n")
 
-        # This would connect to exchanges and fetch real balances
-        # For now, show placeholder
-        print("Exchange      Currency    Available       Locked          Total")
-        print("-" * 70)
+        try:
+            from ..core.state_manager import get_state_manager
+            sm = get_state_manager()
+            balance_state = sm.get_balance_state()
 
-        # Example output format
-        balances = [
-            ("binance", "USDT", "10,000.00", "500.00", "10,500.00"),
-            ("binance", "BTC", "0.5000", "0.0000", "0.5000"),
-            ("mexc", "USDT", "5,000.00", "0.00", "5,000.00"),
-        ]
+            if not balance_state.exchange_balances:
+                print("No balance data available. Is the bot running?")
+                return
 
-        for ex, cur, avail, locked, total in balances:
-            if args.exchange and args.exchange.lower() != ex:
-                continue
-            if args.currency and args.currency.upper() != cur:
-                continue
-            print(f"{ex:<12}  {cur:<10}  {avail:>12}    {locked:>12}    {total:>12}")
+            print("Exchange      Currency    Available       Locked          Total")
+            print("-" * 70)
 
-        print("\n(Use --exchange or --currency to filter)")
+            for exchange, currencies in balance_state.exchange_balances.items():
+                if args.exchange and args.exchange.lower() != exchange.lower():
+                    continue
+                for currency, amounts in currencies.items():
+                    if args.currency and args.currency.upper() != currency.upper():
+                        continue
+                    avail = amounts.get('available', 0)
+                    locked = amounts.get('locked', 0)
+                    total = avail + locked
+                    print(f"{exchange:<12}  {currency:<10}  {avail:>12,.2f}    {locked:>12,.2f}    {total:>12,.2f}")
+
+        except Exception:
+            print("Balance data unavailable. Start the bot with 'carbs start' first.")
 
     async def _handle_trades(self, args):
-        """View trade history"""
+        """View trade history from state manager"""
         print(f"\n=== Recent Trades (Last {args.limit}) ===\n")
 
-        print("Time                 Exchange  Symbol    Side   Price       Qty         P&L")
-        print("-" * 85)
+        try:
+            from ..core.state_manager import get_state_manager
+            sm = get_state_manager()
+            perf_state = sm.get_performance_state()
 
-        # Example output - would fetch from database
-        trades = [
-            ("2024-01-15 14:30:00", "binance", "BTCUSDT", "BUY", "42,150.00", "0.1000", "+$12.50"),
-            ("2024-01-15 14:30:02", "mexc", "BTCUSDT", "SELL", "42,175.00", "0.1000", "-"),
-        ]
+            trades = perf_state.recent_trades[-args.limit:]
+            if not trades:
+                print("No trades recorded. Start the bot with 'carbs start' first.")
+                return
 
-        for time, ex, sym, side, price, qty, pnl in trades:
-            if args.exchange and args.exchange.lower() != ex:
-                continue
-            if args.symbol and args.symbol.upper() != sym:
-                continue
-            print(f"{time}  {ex:<8}  {sym:<8}  {side:<5}  {price:>10}  {qty:>10}  {pnl:>8}")
+            print("Time                 Exchange  Symbol    Side   Price       Qty         P&L")
+            print("-" * 85)
+            for t in trades:
+                ex = t.get('exchange', '?')
+                sym = t.get('symbol', '?')
+                if args.exchange and args.exchange.lower() != ex.lower():
+                    continue
+                if args.symbol and args.symbol.upper() != sym.upper():
+                    continue
+                print(f"{t.get('time', '?'):<20} {ex:<8}  {sym:<8}  "
+                      f"{t.get('side', '?'):<5}  {t.get('price', '?'):>10}  "
+                      f"{t.get('qty', '?'):>10}  {t.get('pnl', '?'):>8}")
+
+        except Exception:
+            print("Trade data unavailable. Start the bot with 'carbs start' first.")
 
     async def _handle_positions(self, args):
-        """View open positions"""
+        """View open positions from state manager"""
         print("\n=== Open Positions ===\n")
 
-        print("Exchange      Symbol    Quantity      Avg Entry     Current      Unrealized P&L")
-        print("-" * 80)
+        try:
+            from ..core.state_manager import get_state_manager
+            sm = get_state_manager()
+            balance_state = sm.get_balance_state()
 
-        # Example output - would fetch from database
-        positions = [
-            ("binance", "BTCUSDT", "0.5000", "$42,000.00", "$42,500.00", "+$250.00"),
-            ("mexc", "ETHUSDT", "2.0000", "$2,200.00", "$2,180.00", "-$40.00"),
-        ]
+            positions = balance_state.open_positions
+            if not positions:
+                print("No open positions.")
+                return
 
-        for ex, sym, qty, entry, current, pnl in positions:
-            if args.exchange and args.exchange.lower() != ex:
-                continue
-            print(f"{ex:<12}  {sym:<8}  {qty:>10}    {entry:>12}  {current:>12}  {pnl:>14}")
+            print("Exchange      Symbol    Quantity      Avg Entry     Current      Unrealized P&L")
+            print("-" * 80)
+            for p in positions:
+                ex = p.get('exchange', '?')
+                if args.exchange and args.exchange.lower() != ex.lower():
+                    continue
+                print(f"{ex:<12}  {p.get('symbol', '?'):<8}  "
+                      f"{p.get('quantity', '?'):>10}    {p.get('entry', '?'):>12}  "
+                      f"{p.get('current', '?'):>12}  {p.get('pnl', '?'):>14}")
 
-        total_pnl = "+$210.00"
-        print("-" * 80)
-        print(f"{'Total Unrealized P&L:':<62} {total_pnl:>14}")
+        except Exception:
+            print("Position data unavailable. Start the bot with 'carbs start' first.")
 
     async def _handle_health(self, args):
-        """System health check"""
+        """Run actual system health checks"""
         print("\n=== System Health ===\n")
 
-        checks = [
-            ("Database", "healthy", "Connected, pool: 5/10"),
-            ("Redis", "healthy", "Connected, memory: 45MB"),
-            ("Binance API", "healthy", "Latency: 45ms"),
-            ("MEXC API", "healthy", "Latency: 120ms"),
-            ("KuCoin API", "degraded", "Latency: 850ms"),
-            ("Memory", "healthy", "Usage: 45%"),
-            ("Disk", "healthy", "Usage: 32%"),
-            ("CPU", "healthy", "Usage: 12%"),
-        ]
+        try:
+            from ..api.health import HealthChecker, HealthStatus
+            checker = HealthChecker()
+            health = await checker.check_health()
 
-        for name, status, details in checks:
-            status_icon = "OK" if status == "healthy" else "WARN" if status == "degraded" else "FAIL"
-            status_color = status_icon
-            if args.verbose:
-                print(f"  [{status_color:4}] {name:<15} - {details}")
-            else:
-                print(f"  [{status_color:4}] {name}")
+            for check in health.checks:
+                icon = "OK" if check.status == HealthStatus.HEALTHY else \
+                       "WARN" if check.status == HealthStatus.DEGRADED else "FAIL"
+                if args.verbose:
+                    print(f"  [{icon:4}] {check.name:<15} - {check.message} ({check.duration_ms:.0f}ms)")
+                else:
+                    print(f"  [{icon:4}] {check.name}")
 
-        print("\nOverall: HEALTHY")
+            print(f"\nOverall: {health.status.value.upper()}")
+
+        except Exception as e:
+            logger.debug(f"Health check error: {e}")
+            # Fallback: basic system checks
+            import psutil
+            mem = psutil.virtual_memory()
+            disk = psutil.disk_usage('/')
+            print(f"  [{'OK':4}] Memory - Usage: {mem.percent}%")
+            print(f"  [{'OK':4}] Disk   - Usage: {disk.percent}%")
+            print(f"  [{'OK':4}] CPU    - Usage: {psutil.cpu_percent()}%")
+            print(f"\nOverall: BASIC (full checks require running bot)")
 
     async def _handle_config(self, args):
-        """Configuration management"""
+        """Configuration management — reads actual config file"""
         if not args.config_action:
             print("Usage: carbs config {show|validate|set}")
             return
 
+        config_path = Path('config/config.yaml')
+
         if args.config_action == 'show':
+            if not config_path.exists():
+                print(f"Config file not found: {config_path}")
+                return
+
+            import yaml
+            with open(config_path) as f:
+                config = yaml.safe_load(f)
+
             print("\n=== Current Configuration ===\n")
-            print("Trading:")
-            print("  mode: paper")
-            print("  max_position_size: 1000.00 USDT")
-            print("  min_spread_bps: 10")
-            print("  max_slippage_bps: 5")
-            print("\nExchanges:")
-            print("  enabled: [binance, mexc, kucoin]")
-            print("\nRisk:")
-            print("  max_drawdown_pct: 5.0")
-            print("  daily_loss_limit: 500.00 USDT")
+            # Pretty-print the actual config
+            yaml.dump(config, sys.stdout, default_flow_style=False, indent=2)
 
         elif args.config_action == 'validate':
             print("\nValidating configuration...")
-            print("  Checking trading parameters... OK")
-            print("  Checking exchange credentials... OK")
-            print("  Checking risk limits... OK")
-            print("  Checking database connection... OK")
-            print("\nConfiguration is valid")
+            try:
+                from ..config.settings import load_config
+                load_config(str(config_path))
+                print("  Configuration is valid")
+            except Exception as e:
+                print(f"  Validation failed: {e}")
 
         elif args.config_action == 'set':
             print(f"\nSetting {args.key} = {args.value}")
-            print("Configuration updated")
-            print("(Restart required for some changes)")
+            print("Note: Use 'config/config.yaml' directly for persistent changes.")
+            print("Runtime config changes are not yet supported.")
 
     async def _handle_opportunities(self, args):
-        """View arbitrage opportunities"""
+        """View arbitrage opportunities from state manager"""
         print(f"\n=== Arbitrage Opportunities (min spread: {args.min_spread} bps) ===\n")
 
-        print("Symbol    Buy Exchange   Sell Exchange  Buy Price    Sell Price   Spread   Score")
-        print("-" * 85)
+        try:
+            from ..core.state_manager import get_state_manager
+            sm = get_state_manager()
+            engine_state = sm.get_engine_state()
 
-        # Example output
-        opps = [
-            ("BTCUSDT", "binance", "mexc", "42,150.00", "42,175.00", "5.93", "0.85"),
-            ("ETHUSDT", "kucoin", "binance", "2,180.00", "2,183.50", "1.61", "0.72"),
-            ("SOLUSDT", "mexc", "kucoin", "95.50", "95.65", "1.57", "0.68"),
-        ]
+            opps = engine_state.recent_opportunities
+            if not opps:
+                print("No opportunities detected. Is the bot running?")
+                return
 
-        for sym, buy_ex, sell_ex, buy_p, sell_p, spread, score in opps:
-            if args.symbol and args.symbol.upper() != sym:
-                continue
-            if float(spread) < args.min_spread:
-                continue
-            print(f"{sym:<8}  {buy_ex:<13}  {sell_ex:<13}  {buy_p:>10}   {sell_p:>10}   {spread:>5}    {score}")
+            print("Symbol    Buy Exchange   Sell Exchange  Buy Price    Sell Price   Spread   Score")
+            print("-" * 85)
+
+            for opp in opps:
+                spread = opp.get('spread_bps', 0)
+                sym = opp.get('symbol', '?')
+                if args.symbol and args.symbol.upper() != sym.upper():
+                    continue
+                if spread < args.min_spread:
+                    continue
+                print(f"{sym:<8}  {opp.get('buy_exchange', '?'):<13}  "
+                      f"{opp.get('sell_exchange', '?'):<13}  "
+                      f"{opp.get('buy_price', '?'):>10}   "
+                      f"{opp.get('sell_price', '?'):>10}   "
+                      f"{spread:>5.2f}    {opp.get('score', '?')}")
+
+        except Exception:
+            print("Opportunity data unavailable. Start the bot with 'carbs start' first.")
 
     async def _handle_metrics(self, args):
-        """View system metrics"""
+        """View system metrics from state manager"""
         print(f"\n=== System Metrics ({args.period}) ===\n")
 
-        print("Trading Performance:")
-        print("  Total Trades: 156")
-        print("  Successful: 148 (94.9%)")
-        print("  Failed: 8 (5.1%)")
-        print("  Total Volume: $125,430.00")
-        print("  Net P&L: +$1,234.56")
+        try:
+            from ..core.state_manager import get_state_manager
+            sm = get_state_manager()
+            perf = sm.get_performance_state()
 
-        print("\nExecution Metrics:")
-        print("  Avg Execution Time: 245ms")
-        print("  Avg Slippage: 2.3 bps")
-        print("  Best Trade: +$45.00")
-        print("  Worst Trade: -$12.50")
+            print("Trading Performance:")
+            print(f"  Total Trades: {perf.total_trades}")
+            print(f"  Successful: {perf.successful_trades}")
+            print(f"  Failed: {perf.failed_trades}")
+            print(f"  Net P&L: ${perf.total_pnl:,.2f}")
 
-        print("\nSystem Health:")
-        print("  Uptime: 99.9%")
-        print("  API Errors: 12")
-        print("  Circuit Breaker Trips: 2")
+            engine = sm.get_engine_state()
+            print(f"\nSystem:")
+            print(f"  Uptime: {engine.uptime_seconds / 3600:.1f}h")
+            print(f"  Circuit Breaker Trips: {engine.circuit_breaker_trips}")
+
+        except Exception:
+            print("Metrics unavailable. Start the bot with 'carbs start' first.")
 
     async def _handle_backtest(self, args):
-        """Run backtest"""
+        """Run backtest using the backtest engine"""
         print(f"\n=== Running Backtest ===")
         print(f"Symbol: {args.symbol}")
         print(f"Period: {args.start} to {args.end}")
+
+        try:
+            from ..backtest.engine import BacktestEngine
+            from ..backtest.models import BacktestConfig
+        except ImportError:
+            print("\nError: Backtest module not available. Check installation.")
+            return
+
         print("\nLoading historical data...")
-        print("Running simulation...")
-        print("\n--- Backtest Results ---")
-        print("Total Trades: 1,234")
-        print("Win Rate: 67.8%")
-        print("Net P&L: +$5,678.90")
-        print("Max Drawdown: 3.2%")
-        print("Sharpe Ratio: 2.1")
-        print("\n(Full report saved to data/backtest_results.json)")
+        try:
+            engine = BacktestEngine()
+            results = await engine.run(
+                symbol=args.symbol,
+                start_date=args.start,
+                end_date=args.end,
+            )
+
+            print(f"\n--- Backtest Results ---")
+            print(f"Total Trades: {results.total_trades}")
+            print(f"Win Rate: {results.win_rate:.1%}")
+            print(f"Net P&L: ${results.net_pnl:,.2f}")
+            print(f"Max Drawdown: {results.max_drawdown:.1%}")
+            print(f"Sharpe Ratio: {results.sharpe_ratio:.2f}")
+
+        except Exception as e:
+            print(f"\nBacktest failed: {e}")
 
 
 async def _async_main():

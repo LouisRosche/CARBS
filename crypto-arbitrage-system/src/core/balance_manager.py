@@ -14,7 +14,7 @@ This is a CRITICAL component - trades must NOT execute without balance validatio
 import asyncio
 import logging
 from decimal import Decimal
-from typing import Dict, Optional, List, Set
+from typing import Dict, Optional
 from dataclasses import dataclass, field
 from datetime import datetime, timezone, timedelta
 from enum import Enum
@@ -403,10 +403,11 @@ class BalanceManager:
 
         age = (datetime.now(timezone.utc) - exchange_balances.last_update).total_seconds()
         if age > self.stale_threshold:
+            self._validation_failures += 1
             logger.warning(
-                f"Stale balance data for {exchange} ({age:.0f}s old)"
+                f"Stale balance data for {exchange} ({age:.0f}s old, threshold={self.stale_threshold}s)"
             )
-            # Don't fail, but warn - stale data is risky
+            return False, f"Stale balance data for {exchange} ({age:.0f}s old). Refresh required."
 
         # Get available balance
         available = await self.get_available_balance(exchange, asset)
@@ -491,16 +492,30 @@ class BalanceManager:
         Returns:
             Lock ID if successful, None if insufficient balance
         """
-        # Validate we have enough to lock
-        available = await self.get_available_balance(exchange, asset)
-        if available < amount:
-            logger.warning(
-                f"Cannot lock {amount} {asset} on {exchange}: "
-                f"only {available} available"
-            )
-            return None
-
         async with self._lock:
+            # Inline availability check to prevent TOCTOU race and avoid deadlock
+            # (get_available_balance -> _get_locked_amount also acquires self._lock)
+            balance = self.get_balance(exchange, asset)
+            if not balance:
+                logger.warning(f"No balance data for {asset} on {exchange}")
+                return None
+
+            # Calculate locked amount inline (already holding self._lock)
+            locked_amount = sum(
+                lock.amount for lock in self._locks.values()
+                if lock.exchange == exchange and lock.asset == asset and lock.is_active
+            )
+            available = balance.free - locked_amount
+            reserve = balance.total * self.reserve_ratio
+            available = max(Decimal("0"), available - reserve)
+
+            if available < amount:
+                logger.warning(
+                    f"Cannot lock {amount} {asset} on {exchange}: "
+                    f"only {available} available"
+                )
+                return None
+
             self._lock_counter += 1
             lock_id = f"lock_{exchange}_{asset}_{self._lock_counter}"
 
