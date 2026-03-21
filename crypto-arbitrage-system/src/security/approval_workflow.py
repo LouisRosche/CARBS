@@ -381,16 +381,19 @@ class ApprovalWorkflowEngine:
             f"Approval request {request_id} created: {approval_type.value} by {requester_id}"
         )
 
-        # Send notification
+        # Send notification (non-fatal — don't let notification failures block the workflow)
         if self.notification_callback:
-            await self.notification_callback(
-                f"Approval Required: {approval_type.value}",
-                f"Request ID: {request_id}\n"
-                f"Requester: {requester_id}\n"
-                f"Reason: {reason}\n"
-                f"Required approvers: {rule.required_approvers}\n"
-                f"Expires: {request.expires_at.strftime('%Y-%m-%d %H:%M UTC')}"
-            )
+            try:
+                await self.notification_callback(
+                    f"Approval Required: {approval_type.value}",
+                    f"Request ID: {request_id}\n"
+                    f"Requester: {requester_id}\n"
+                    f"Reason: {reason}\n"
+                    f"Required approvers: {rule.required_approvers}\n"
+                    f"Expires: {request.expires_at.strftime('%Y-%m-%d %H:%M UTC')}"
+                )
+            except Exception as e:
+                logger.error(f"Notification failed for request {request_id}: {e}")
 
         return request
 
@@ -475,12 +478,15 @@ class ApprovalWorkflowEngine:
                 logger.info(f"Request {request_id} fully approved")
 
                 if self.notification_callback:
-                    await self.notification_callback(
-                        f"Request Approved: {request.approval_type.value}",
-                        f"Request ID: {request_id}\n"
-                        f"Approvers: {len(request.approvals)}/{rule.required_approvers}\n"
-                        f"Executable at: {request.executable_at.strftime('%Y-%m-%d %H:%M UTC')}"
-                    )
+                    try:
+                        await self.notification_callback(
+                            f"Request Approved: {request.approval_type.value}",
+                            f"Request ID: {request_id}\n"
+                            f"Approvers: {len(request.approvals)}/{rule.required_approvers}\n"
+                            f"Executable at: {request.executable_at.strftime('%Y-%m-%d %H:%M UTC')}"
+                        )
+                    except Exception as e:
+                        logger.error(f"Notification failed for approval {request_id}: {e}")
 
             self._save_state()
 
@@ -529,12 +535,15 @@ class ApprovalWorkflowEngine:
             logger.info(f"Request {request_id} rejected by {rejector_id}: {reason}")
 
             if self.notification_callback:
-                await self.notification_callback(
-                    f"Request Rejected: {request.approval_type.value}",
-                    f"Request ID: {request_id}\n"
-                    f"Rejected by: {rejector_id}\n"
-                    f"Reason: {reason}"
-                )
+                try:
+                    await self.notification_callback(
+                        f"Request Rejected: {request.approval_type.value}",
+                        f"Request ID: {request_id}\n"
+                        f"Rejected by: {rejector_id}\n"
+                        f"Reason: {reason}"
+                    )
+                except Exception as e:
+                    logger.error(f"Notification failed for rejection {request_id}: {e}")
 
             return True, "Request rejected"
 
@@ -658,12 +667,14 @@ class ApprovalWorkflowEngine:
         self,
         request_id: str,
         canceller_id: str,
-        reason: str
+        reason: str,
+        canceller_role: str = ""
     ) -> tuple:
         """
-        Cancel a pending request
+        Cancel a pending request.
 
-        Only the requester or admin can cancel.
+        Only the original requester or a user whose role is in the
+        approval rule's required_roles (i.e., admin/super_admin) can cancel.
         """
         async with self._lock:
             request = self._pending_requests.get(request_id)
@@ -674,9 +685,10 @@ class ApprovalWorkflowEngine:
                 return False, f"Request is {request.status.value}"
 
             if canceller_id != request.requester_id:
-                # Check if admin
-                # For now, allow any cancellation with reason
-                pass
+                # Non-requesters must have a privileged role for this operation type
+                rule = self._rules.get(request.approval_type)
+                if not rule or canceller_role not in rule.required_roles:
+                    return False, "Only the requester or an authorized role can cancel this request"
 
             request.status = ApprovalStatus.CANCELLED
             self._save_state()
@@ -775,12 +787,12 @@ class TradeApprovalMiddleware:
         async with self._approval_lock:
             self._approved_trade_ids[trade_id] = datetime.now(timezone.utc)
 
-        # Cleanup old approvals
-        cutoff = datetime.now(timezone.utc) - timedelta(hours=1)
-        self._approved_trade_ids = {
-            tid: ts for tid, ts in self._approved_trade_ids.items()
-            if ts > cutoff
-        }
+            # Cleanup old approvals (inside lock to prevent concurrent dict mutation)
+            cutoff = datetime.now(timezone.utc) - timedelta(hours=1)
+            self._approved_trade_ids = {
+                tid: ts for tid, ts in self._approved_trade_ids.items()
+                if ts > cutoff
+            }
 
 
 # Helper function to create workflow engine with common configuration

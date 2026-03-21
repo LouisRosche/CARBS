@@ -579,3 +579,73 @@ if not isinstance(session_id, str) or not session_id:
 **Issue:** Financial calculations convert `Decimal` to `float()` for Sharpe ratio, position sizing, and VaR, then convert back via `Decimal(str(float_val))`. This introduces rounding errors that accumulate across many trades. In a high-frequency arbitrage system, sub-basis-point errors in position sizing can compound into material P&L discrepancies.
 
 **Remediation:** Keep all financial math in `Decimal`; only convert to `float` for display/logging.
+
+---
+
+## Addendum — Deep Audit Pass (2026-03-21)
+
+A second-pass adversarial review identified and resolved the following additional findings:
+
+### A1: Authorization Bypass in Approval Cancellation (Critical — FIXED)
+
+**Location:** `src/security/approval_workflow.py:676-679`
+
+**Issue:** `cancel_request()` docstring stated "Only the requester or admin can cancel" but the implementation had a `pass` placeholder — any user could cancel any approval request. This allowed an attacker to cancel pending mode-switch approvals (which require 2 admins), bypassing multi-signature requirements.
+
+**Fix:** Added `canceller_role` parameter; non-requesters must have a role in the operation's `required_roles` list.
+
+### A2: Notification Callback Crash Aborts Approval Workflow (High — FIXED)
+
+**Location:** `src/security/approval_workflow.py` — `create_request()`, `approve()`, `reject()`
+
+**Issue:** All three methods called `self.notification_callback()` without try/except. A failed notification (network timeout, misconfigured webhook) would propagate as an unhandled exception, crashing the operation mid-lock — potentially leaving state inconsistent (e.g., approval recorded in memory but notification throws before `_save_state()`).
+
+**Fix:** Wrapped all notification callbacks in try/except with error logging.
+
+### A3: Race Condition in Trade Approval Cleanup (Medium — FIXED)
+
+**Location:** `src/security/approval_workflow.py:779-783` — `mark_trade_approved()`
+
+**Issue:** Dict cleanup (`self._approved_trade_ids = {...}`) ran outside the `_approval_lock`, creating a race where `check_trade_approval()` could read a partially-replaced dict.
+
+**Fix:** Moved cleanup inside the lock.
+
+### A4: Stale Balance Data Silently Passes Trade Validation (Critical — FIXED)
+
+**Location:** `src/core/balance_manager.py:403-408`
+
+**Issue:** When balance data exceeded `stale_threshold` (60s), the code logged a warning but continued to validate the trade as OK. This means trades could execute against stale balances — causing overdrafts, failed orders, or cascading losses from rejected fills.
+
+**Fix:** Changed to return `(False, "Stale balance data...")` to reject trades with stale data.
+
+### A5: TOCTOU in Balance Lock Acquisition (Critical — FIXED)
+
+**Location:** `src/core/balance_manager.py:493-502`
+
+**Issue:** `get_available_balance()` was called outside the `async with self._lock:` block. Between the check and the lock acquisition, another coroutine could acquire the same balance, leading to double-allocation of funds.
+
+**Fix:** Moved the availability check inside the lock so check-and-lock is atomic.
+
+### A6: Non-Numeric Balance Crashes Graceful Shutdown (Medium — FIXED)
+
+**Location:** `src/core/graceful_shutdown.py:384-387`
+
+**Issue:** `Decimal(free_balance)` could throw `InvalidOperation` on non-numeric strings returned by exchanges, crashing the position-closing loop during shutdown and leaving positions orphaned.
+
+**Fix:** Added try/except around the conversion with a continue to skip un-parseable balances.
+
+### A7: CORS Allows Empty-String Origin (Medium — FIXED)
+
+**Location:** `src/api/server.py:143`
+
+**Issue:** `''.split(',')` produces `['']` (a list with one empty string), which is truthy so `or []` never triggers. An empty-string origin in the allowed list could match requests with no `Origin` header on some CORS implementations.
+
+**Fix:** Changed to list comprehension that strips and filters empty strings.
+
+### A8: TOTP Token Comparison is Timing-Vulnerable (High — FIXED)
+
+**Location:** `src/security/auth.py:189`
+
+**Issue:** TOTP verification compared tokens with `==`, which short-circuits on first mismatched character. An attacker with precise timing could determine the correct TOTP token character-by-character (6-digit TOTP × ~10 possibilities = ~60 timing measurements instead of 10^6 brute force).
+
+**Fix:** Replaced `==` with `hmac.compare_digest()` for constant-time comparison.

@@ -369,12 +369,13 @@ class TestApprovalWorkflow:
 
         assert request.status == ApprovalStatus.PENDING
 
-        # Approve request
+        # Approve request (CONFIG_CHANGE requires 2FA by default)
         success, message, fully_approved = await engine.approve(
             request_id=request.request_id,
             approver_id="admin1",
             approver_role="admin",
-            reason="Looks good"
+            reason="Looks good",
+            verified_2fa=True
         )
 
         assert success is True
@@ -425,13 +426,14 @@ class TestApprovalWorkflow:
             reason="Test"
         )
 
-        # Simulate concurrent approvals
+        # Simulate concurrent approvals (CONFIG_CHANGE requires 2FA by default)
         async def approve(approver_id):
             return await engine.approve(
                 request_id=request.request_id,
                 approver_id=approver_id,
                 approver_role="admin",
-                reason="Approved"
+                reason="Approved",
+                verified_2fa=True
             )
 
         results = await asyncio.gather(
@@ -693,6 +695,8 @@ class TestApprovalWorkflowRaceCondition:
         from pathlib import Path
 
         engine = ApprovalWorkflowEngine(data_dir=Path(temp_approval_dir))
+        # Remove time delay for testing so execute_if_ready works immediately
+        engine.configure_rule(ApprovalType.CONFIG_CHANGE, time_delay_minutes=0)
 
         # Create and approve request
         request = await engine.create_request(
@@ -703,12 +707,13 @@ class TestApprovalWorkflowRaceCondition:
             reason="Test"
         )
 
-        # Approve it
+        # Approve it (CONFIG_CHANGE requires 2FA by default)
         await engine.approve(
             request_id=request.request_id,
             approver_id="admin1",
             approver_role="admin",
-            reason="Approved"
+            reason="Approved",
+            verified_2fa=True
         )
 
         # Track execution attempts
@@ -750,6 +755,8 @@ class TestApprovalWorkflowRaceCondition:
         from pathlib import Path
 
         engine = ApprovalWorkflowEngine(data_dir=Path(temp_approval_dir))
+        # Remove time delay for testing so execute_if_ready works immediately
+        engine.configure_rule(ApprovalType.CONFIG_CHANGE, time_delay_minutes=0)
 
         request = await engine.create_request(
             approval_type=ApprovalType.CONFIG_CHANGE,
@@ -763,7 +770,8 @@ class TestApprovalWorkflowRaceCondition:
             request_id=request.request_id,
             approver_id="admin1",
             approver_role="admin",
-            reason="Approved"
+            reason="Approved",
+            verified_2fa=True
         )
 
         async def failing_executor(details):

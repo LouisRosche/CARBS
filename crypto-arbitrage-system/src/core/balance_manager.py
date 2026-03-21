@@ -402,10 +402,11 @@ class BalanceManager:
 
         age = (datetime.now(timezone.utc) - exchange_balances.last_update).total_seconds()
         if age > self.stale_threshold:
+            self._validation_failures += 1
             logger.warning(
-                f"Stale balance data for {exchange} ({age:.0f}s old)"
+                f"Stale balance data for {exchange} ({age:.0f}s old, threshold={self.stale_threshold}s)"
             )
-            # Don't fail, but warn - stale data is risky
+            return False, f"Stale balance data for {exchange} ({age:.0f}s old). Refresh required."
 
         # Get available balance
         available = self.get_available_balance(exchange, asset)
@@ -490,16 +491,16 @@ class BalanceManager:
         Returns:
             Lock ID if successful, None if insufficient balance
         """
-        # Validate we have enough to lock
-        available = self.get_available_balance(exchange, asset)
-        if available < amount:
-            logger.warning(
-                f"Cannot lock {amount} {asset} on {exchange}: "
-                f"only {available} available"
-            )
-            return None
-
         async with self._lock:
+            # Check availability inside the lock to prevent TOCTOU race conditions
+            available = self.get_available_balance(exchange, asset)
+            if available < amount:
+                logger.warning(
+                    f"Cannot lock {amount} {asset} on {exchange}: "
+                    f"only {available} available"
+                )
+                return None
+
             self._lock_counter += 1
             lock_id = f"lock_{exchange}_{asset}_{self._lock_counter}"
 

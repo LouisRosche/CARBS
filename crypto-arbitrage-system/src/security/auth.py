@@ -186,7 +186,7 @@ class TOTP:
         # Check current and adjacent time windows
         for offset in range(-tolerance, tolerance + 1):
             check_time = timestamp + (offset * TOTP.PERIOD)
-            if TOTP.get_totp_token(secret, check_time) == token:
+            if hmac.compare_digest(TOTP.get_totp_token(secret, check_time), token):
                 return True
 
         return False
