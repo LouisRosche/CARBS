@@ -176,10 +176,15 @@ class AdvancedArbitrageBot:
 
         # Persistent WebSocket orderbook cache: {(exchange, symbol): EnhancedOrderBook}
         self._latest_orderbooks = {}
+        # Lock protecting _latest_orderbooks writes (reads of individual keys are safe
+        # since dict[key] assignment is atomic, but we guard multi-step operations)
+        self._orderbook_lock = asyncio.Lock()
         # Event fired when any orderbook updates for a given symbol: {symbol: asyncio.Event}
         self._orderbook_events = {}
 
-        # Tracking
+        # Tracking (protected by GIL for simple increments, but we use a lock
+        # for the compound read-modify-write in state updates)
+        self._counter_lock = asyncio.Lock()
         self.opportunities_detected = 0
         self.opportunities_scored = 0
         self.opportunities_executed = 0
@@ -390,8 +395,9 @@ class AdvancedArbitrageBot:
                     asks=[(Decimal(str(p)), Decimal(str(v))) for p, v in ob_data['asks'][:20]]
                 )
 
-                # Store in-memory (lock-free: dict assignment is atomic in CPython)
-                self._latest_orderbooks[(exchange_name, symbol)] = orderbook
+                # Store in-memory under lock for safe concurrent access
+                async with self._orderbook_lock:
+                    self._latest_orderbooks[(exchange_name, symbol)] = orderbook
 
                 # Update price history for cointegration analysis
                 self.advanced_engine.update_price_history(
@@ -481,11 +487,14 @@ class AdvancedArbitrageBot:
         ]
         orderbooks = await asyncio.gather(*tasks, return_exceptions=True)
 
-        # Filter valid orderbooks
-        valid_orderbooks = [
-            ob for ob in orderbooks
-            if isinstance(ob, EnhancedOrderBook) and ob is not None
-        ]
+        # Filter valid orderbooks, logging any exceptions from failed fetches
+        valid_orderbooks = []
+        for ob in orderbooks:
+            if isinstance(ob, Exception):
+                logger.warning(f"Orderbook fetch failed for {symbol}: {ob}")
+                self.metrics.increment('orderbook_fetch_errors')
+            elif isinstance(ob, EnhancedOrderBook):
+                valid_orderbooks.append(ob)
 
         if len(valid_orderbooks) < 2:
             return None
@@ -712,7 +721,7 @@ class AdvancedArbitrageBot:
                 sortino_ratio=portfolio_risk.sortino_ratio,
                 var_95=Decimal(str(portfolio_risk.var_95)),
                 total_trades=portfolio_risk.total_trades,
-                successful_trades=portfolio_risk.winning_trades if hasattr(portfolio_risk, 'winning_trades') else 0
+                successful_trades=int(portfolio_risk.total_trades * portfolio_risk.win_rate)
             )
 
             # Record trade in state manager for dashboard
@@ -896,9 +905,8 @@ class AdvancedArbitrageBot:
         check_interval = self.config.performance.get('check_interval_seconds', 2)
         logger.info(f"👀 Monitoring {symbol} (event-driven, fallback {check_interval}s)...")
 
-        # Create event for this symbol — WS streams will set() it on each update
-        event = asyncio.Event()
-        self._orderbook_events[symbol] = event
+        # Use pre-created event (initialized in run() before streams start)
+        event = self._orderbook_events[symbol]
 
         while self.running:
             try:
@@ -962,6 +970,11 @@ class AdvancedArbitrageBot:
 
         tasks = []
 
+        # Pre-create events for all symbols BEFORE starting streams,
+        # so streams can signal monitors from the very first update.
+        for symbol in self.config.symbols:
+            self._orderbook_events[symbol] = asyncio.Event()
+
         # Start persistent WebSocket orderbook streams (1 per exchange/symbol pair)
         for exchange_name in self.exchanges:
             for symbol in self.config.symbols:
@@ -987,7 +1000,11 @@ class AdvancedArbitrageBot:
         if self.antifragile:
             tasks.append(self._run_antifragile_adaptation())
 
-        await asyncio.gather(*tasks, return_exceptions=True)
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        # Log any top-level task failures (streams/monitors that crashed unexpectedly)
+        for i, result in enumerate(results):
+            if isinstance(result, Exception):
+                logger.error(f"Task {i} failed with unhandled exception: {result}", exc_info=result)
 
     async def _monitor_sentiment(self):
         """Monitor market sentiment and update state"""
@@ -1035,12 +1052,30 @@ class AdvancedArbitrageBot:
                 adaptations = await self.antifragile.run_adaptation_cycle()
 
                 if adaptations:
-                    logger.info(f"🔄 Antifragile adaptations applied: {adaptations}")
+                    logger.info(f"🔄 Antifragile adaptations proposed: {adaptations}")
 
-                    # Update config with new parameters
+                    # Update config with new parameters, enforcing safety bounds
+                    # to prevent the adaptation from bypassing __post_init__ validation
+                    SAFETY_BOUNDS = {
+                        'max_position_usd': (1.0, self.config.trading.MAX_ALLOWED_POSITION_USD),
+                        'min_spread_percent': (self.config.trading.MIN_ALLOWED_SPREAD_PERCENT, 100.0),
+                        'max_daily_loss_usd': (1.0, self.config.trading.MAX_ALLOWED_DAILY_LOSS_USD),
+                        'max_slippage_bps': (1, 500),
+                    }
                     for param, value in adaptations.items():
-                        if hasattr(self.config.trading, param):
-                            setattr(self.config.trading, param, value)
+                        if not hasattr(self.config.trading, param):
+                            continue
+                        bounds = SAFETY_BOUNDS.get(param)
+                        if bounds:
+                            lo, hi = bounds
+                            if value < lo or value > hi:
+                                logger.warning(
+                                    f"Antifragile adaptation rejected: {param}={value} "
+                                    f"outside safety bounds [{lo}, {hi}]"
+                                )
+                                continue
+                        setattr(self.config.trading, param, value)
+                        logger.info(f"  Applied: {param} = {value}")
 
                 # Run stress test periodically
                 stress_results = await self.antifragile.run_stress_test()
