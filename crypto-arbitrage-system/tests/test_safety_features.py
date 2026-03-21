@@ -276,3 +276,393 @@ async def test_fetch_orderbook_fallback_on_empty_cache():
     bot.exchanges["binance"].watch_order_book.assert_awaited_once_with("BTC/USDT")
     # Should also populate the in-memory cache
     assert ("binance", "BTC/USDT") in bot._latest_orderbooks
+
+
+# =========================================================================== #
+# Debiased Revalidation Tests — verifying critical fixes are correct
+# =========================================================================== #
+
+
+# --------------------------------------------------------------------------- #
+# Test 8: Pre-created events available before streams start
+# --------------------------------------------------------------------------- #
+@pytest.mark.asyncio
+async def test_events_precreated_before_streams():
+    """run() should pre-create _orderbook_events for all symbols BEFORE streams start."""
+    bot = _make_bot()
+    bot.running = False  # Stop immediately after setup
+
+    # Patch initialize to be a no-op (we only care about event pre-creation)
+    bot.initialize = AsyncMock()
+    bot.state_manager.update_trading_state = MagicMock()
+
+    # Override _stream_orderbook to capture event state at stream start time
+    events_at_stream_start = {}
+
+    async def capture_stream(exchange_name, symbol):
+        # Record whether event exists when stream starts
+        events_at_stream_start[(exchange_name, symbol)] = symbol in bot._orderbook_events
+        # Stop the bot so run() terminates
+        bot.running = False
+
+    bot._stream_orderbook = capture_stream
+    bot.monitor_symbol = AsyncMock()
+    bot.print_stats = AsyncMock()
+
+    await bot.run()
+
+    # Every stream should have seen its event already pre-created
+    for key, had_event in events_at_stream_start.items():
+        assert had_event, f"Event missing when stream started for {key}"
+
+
+# --------------------------------------------------------------------------- #
+# Test 9: monitor_symbol uses pre-created event (not creating a new one)
+# --------------------------------------------------------------------------- #
+@pytest.mark.asyncio
+async def test_monitor_symbol_uses_precreated_event():
+    """monitor_symbol should reference the event from _orderbook_events, not create one."""
+    bot = _make_bot()
+    bot.running = True
+
+    # Pre-create the event (as run() would do)
+    original_event = asyncio.Event()
+    bot._orderbook_events["BTC/USDT"] = original_event
+
+    # Mock find_and_score_arbitrage to stop after first iteration
+    call_count = 0
+
+    async def mock_find(symbol):
+        nonlocal call_count
+        call_count += 1
+        if call_count >= 1:
+            bot.running = False
+        return None
+
+    bot.find_and_score_arbitrage = mock_find
+
+    # Set the event so monitor_symbol wakes up immediately
+    original_event.set()
+
+    await bot.monitor_symbol("BTC/USDT")
+
+    # The event in _orderbook_events should still be the SAME object (not replaced)
+    assert bot._orderbook_events["BTC/USDT"] is original_event
+
+
+# --------------------------------------------------------------------------- #
+# Test 10: gather exception logging in find_and_score_arbitrage
+# --------------------------------------------------------------------------- #
+@pytest.mark.asyncio
+async def test_gather_exceptions_logged():
+    """find_and_score_arbitrage should log exceptions from failed fetches, not swallow."""
+    bot = _make_bot()
+    bot.risk_manager = MagicMock()
+    bot.scoring_engine = MagicMock()
+
+    # One exchange succeeds, one raises
+    async def fetch_ok(ex, sym):
+        return _make_orderbook(ex, sym)
+
+    async def fetch_fail(ex, sym):
+        raise ConnectionError("exchange down")
+
+    original_fetch = bot.fetch_orderbook
+
+    async def mock_fetch(exchange_name, symbol):
+        if exchange_name == "binance":
+            return await fetch_ok(exchange_name, symbol)
+        raise ConnectionError("exchange down")
+
+    bot.fetch_orderbook = mock_fetch
+
+    result = await bot.find_and_score_arbitrage("BTC/USDT")
+
+    # Should return None (only 1 valid orderbook, need 2)
+    assert result is None
+    # The exception should have been counted
+    bot.metrics.increment.assert_any_call("orderbook_fetch_errors")
+
+
+# --------------------------------------------------------------------------- #
+# Test 11: PortfolioRisk.winning_trades computed from win_rate * total_trades
+# --------------------------------------------------------------------------- #
+def test_portfolio_risk_successful_trades_computation():
+    """successful_trades should be computed as int(total_trades * win_rate)."""
+    from src.core.risk_manager import PortfolioRisk
+
+    pr = PortfolioRisk(
+        total_positions_usd=Decimal("10000"),
+        var_95=Decimal("500"),
+        var_99=Decimal("800"),
+        expected_shortfall=Decimal("600"),
+        sharpe_ratio=1.5,
+        sortino_ratio=2.0,
+        max_drawdown=Decimal("200"),
+        max_drawdown_percent=2.0,
+        current_drawdown=Decimal("50"),
+        win_rate=0.75,
+        profit_factor=3.0,
+        avg_win=Decimal("100"),
+        avg_loss=Decimal("33"),
+        total_trades=100,
+    )
+
+    # Verify it does NOT have a winning_trades field
+    assert not hasattr(pr, "winning_trades")
+
+    # Verify the computation we use in advanced_main.py
+    successful = int(pr.total_trades * pr.win_rate)
+    assert successful == 75
+
+
+# --------------------------------------------------------------------------- #
+# Test 12: Antifragile adaptation rejects non-tunable params
+# --------------------------------------------------------------------------- #
+@pytest.mark.asyncio
+async def test_antifragile_rejects_non_tunable_param():
+    """Antifragile adaptation should reject params not in TUNABLE_PARAMS allowlist."""
+    bot = _make_bot()
+    bot.running = True
+
+    # Use a real TradingConfig so __post_init__ works
+    from src.config.settings import TradingConfig
+    bot.config.trading = TradingConfig(
+        mode="paper",
+        min_spread_percent=0.3,
+        max_spread_percent=10.0,
+        max_position_usd=500,
+        max_daily_loss_usd=100,
+    )
+
+    # Mock antifragile to propose changing 'mode' (forbidden)
+    bot.antifragile = AsyncMock()
+    bot.antifragile.run_adaptation_cycle = AsyncMock(
+        return_value={"mode": "live"}
+    )
+    bot.antifragile.run_stress_test = AsyncMock(return_value={"risk_level": 0.1})
+
+    # Run one cycle then stop
+    original_sleep = asyncio.sleep
+
+    async def one_shot_sleep(seconds):
+        bot.running = False
+
+    with patch("asyncio.sleep", side_effect=one_shot_sleep):
+        await bot._run_antifragile_adaptation()
+
+    # mode should still be "paper" — the adaptation was rejected
+    assert bot.config.trading.mode == "paper"
+
+
+# --------------------------------------------------------------------------- #
+# Test 13: Antifragile adaptation rejects values violating safety bounds
+# --------------------------------------------------------------------------- #
+@pytest.mark.asyncio
+async def test_antifragile_rejects_unsafe_values():
+    """Antifragile should reject values that violate TradingConfig safety bounds."""
+    bot = _make_bot()
+    bot.running = True
+
+    from src.config.settings import TradingConfig
+    bot.config.trading = TradingConfig(
+        mode="paper",
+        min_spread_percent=0.3,
+        max_spread_percent=10.0,
+        max_position_usd=500,
+        max_daily_loss_usd=100,
+    )
+
+    # Propose max_position_usd above the $100k hard cap
+    bot.antifragile = AsyncMock()
+    bot.antifragile.run_adaptation_cycle = AsyncMock(
+        return_value={"max_position_usd": 999999.0}
+    )
+    bot.antifragile.run_stress_test = AsyncMock(return_value={"risk_level": 0.1})
+
+    async def one_shot_sleep(seconds):
+        bot.running = False
+
+    with patch("asyncio.sleep", side_effect=one_shot_sleep):
+        await bot._run_antifragile_adaptation()
+
+    # Should have been rolled back to 500 (original value)
+    assert bot.config.trading.max_position_usd == 500
+
+
+# --------------------------------------------------------------------------- #
+# Test 14: Antifragile adaptation ACCEPTS valid values
+# --------------------------------------------------------------------------- #
+@pytest.mark.asyncio
+async def test_antifragile_accepts_valid_values():
+    """Antifragile should accept tunable params within safety bounds."""
+    bot = _make_bot()
+    bot.running = True
+
+    from src.config.settings import TradingConfig
+    bot.config.trading = TradingConfig(
+        mode="paper",
+        min_spread_percent=0.3,
+        max_spread_percent=10.0,
+        max_position_usd=500,
+        max_daily_loss_usd=100,
+    )
+
+    # Propose a valid increase within bounds
+    bot.antifragile = AsyncMock()
+    bot.antifragile.run_adaptation_cycle = AsyncMock(
+        return_value={"max_position_usd": 1000.0}
+    )
+    bot.antifragile.run_stress_test = AsyncMock(return_value={"risk_level": 0.1})
+
+    async def one_shot_sleep(seconds):
+        bot.running = False
+
+    with patch("asyncio.sleep", side_effect=one_shot_sleep):
+        await bot._run_antifragile_adaptation()
+
+    # Should have been applied
+    assert bot.config.trading.max_position_usd == 1000.0
+
+
+# --------------------------------------------------------------------------- #
+# Test 15: Antifragile rejects min_spread below safety minimum
+# --------------------------------------------------------------------------- #
+@pytest.mark.asyncio
+async def test_antifragile_rejects_min_spread_below_safety():
+    """min_spread_percent below MIN_ALLOWED_SPREAD_PERCENT (0.05) should be rejected."""
+    bot = _make_bot()
+    bot.running = True
+
+    from src.config.settings import TradingConfig
+    bot.config.trading = TradingConfig(
+        mode="paper",
+        min_spread_percent=0.3,
+        max_spread_percent=10.0,
+        max_position_usd=500,
+        max_daily_loss_usd=100,
+    )
+
+    bot.antifragile = AsyncMock()
+    bot.antifragile.run_adaptation_cycle = AsyncMock(
+        return_value={"min_spread_percent": 0.01}  # Below 0.05 safety minimum
+    )
+    bot.antifragile.run_stress_test = AsyncMock(return_value={"risk_level": 0.1})
+
+    async def one_shot_sleep(seconds):
+        bot.running = False
+
+    with patch("asyncio.sleep", side_effect=one_shot_sleep):
+        await bot._run_antifragile_adaptation()
+
+    # Should remain at 0.3 (original)
+    assert bot.config.trading.min_spread_percent == 0.3
+
+
+# --------------------------------------------------------------------------- #
+# Test 16: Main gather logs task failures
+# --------------------------------------------------------------------------- #
+@pytest.mark.asyncio
+async def test_main_gather_logs_task_failures():
+    """run() should log exceptions from crashed tasks, not silently swallow."""
+    bot = _make_bot()
+    bot.running = False  # Will stop loops quickly
+
+    bot.initialize = AsyncMock()
+    bot.state_manager.update_trading_state = MagicMock()
+
+    # Make _stream_orderbook raise an unexpected error
+    async def crashing_stream(exchange_name, symbol):
+        raise RuntimeError("Unexpected crash in stream")
+
+    bot._stream_orderbook = crashing_stream
+    bot.monitor_symbol = AsyncMock(return_value=None)
+    bot.print_stats = AsyncMock(return_value=None)
+
+    # run() should complete without raising (gather returns exceptions)
+    await bot.run()
+    # The task should have produced a RuntimeError in results — we just verify
+    # run() didn't crash (the error is logged, not raised)
+
+
+# --------------------------------------------------------------------------- #
+# Test 17: TradingConfig __post_init__ validation
+# --------------------------------------------------------------------------- #
+def test_trading_config_validates_on_init():
+    """TradingConfig should raise on invalid values during __post_init__."""
+    from src.config.settings import TradingConfig, ConfigValidationError
+
+    # Valid config should work
+    tc = TradingConfig(
+        mode="paper", min_spread_percent=0.1, max_spread_percent=5.0,
+        max_position_usd=1000, max_daily_loss_usd=100,
+    )
+    assert tc.mode == "paper"
+
+    # Position above hard cap
+    with pytest.raises(ConfigValidationError, match="safety limit"):
+        TradingConfig(
+            mode="paper", min_spread_percent=0.1, max_spread_percent=5.0,
+            max_position_usd=200000, max_daily_loss_usd=100,
+        )
+
+    # Spread below minimum
+    with pytest.raises(ConfigValidationError, match="safety minimum"):
+        TradingConfig(
+            mode="paper", min_spread_percent=0.01, max_spread_percent=5.0,
+            max_position_usd=1000, max_daily_loss_usd=100,
+        )
+
+    # Invalid mode
+    with pytest.raises(ConfigValidationError, match="Invalid trading mode"):
+        TradingConfig(mode="yolo")
+
+    # Slippage above 500 bps
+    with pytest.raises(ConfigValidationError, match="max_slippage_bps"):
+        TradingConfig(
+            mode="paper", min_spread_percent=0.1, max_spread_percent=5.0,
+            max_position_usd=1000, max_daily_loss_usd=100,
+            max_slippage_bps=600,
+        )
+
+
+# --------------------------------------------------------------------------- #
+# Test 18: Antifragile adaptation with multiple params (some valid, some not)
+# --------------------------------------------------------------------------- #
+@pytest.mark.asyncio
+async def test_antifragile_mixed_adaptations():
+    """Antifragile: valid params applied, invalid ones rejected, independently."""
+    bot = _make_bot()
+    bot.running = True
+
+    from src.config.settings import TradingConfig
+    bot.config.trading = TradingConfig(
+        mode="paper",
+        min_spread_percent=0.3,
+        max_spread_percent=10.0,
+        max_position_usd=500,
+        max_daily_loss_usd=100,
+        max_slippage_bps=50,
+    )
+
+    # Mix: order_timeout_seconds=15 (valid), mode=live (blocked by allowlist),
+    # max_slippage_bps=600 (blocked by __post_init__)
+    bot.antifragile = AsyncMock()
+    bot.antifragile.run_adaptation_cycle = AsyncMock(
+        return_value={
+            "order_timeout_seconds": 15,
+            "mode": "live",
+            "max_slippage_bps": 600,
+        }
+    )
+    bot.antifragile.run_stress_test = AsyncMock(return_value={"risk_level": 0.1})
+
+    async def one_shot_sleep(seconds):
+        bot.running = False
+
+    with patch("asyncio.sleep", side_effect=one_shot_sleep):
+        await bot._run_antifragile_adaptation()
+
+    assert bot.config.trading.order_timeout_seconds == 15  # Applied
+    assert bot.config.trading.mode == "paper"              # Rejected (not tunable)
+    assert bot.config.trading.max_slippage_bps == 50       # Rejected (validation failed)

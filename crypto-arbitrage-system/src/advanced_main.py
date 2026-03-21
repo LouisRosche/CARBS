@@ -175,16 +175,13 @@ class AdvancedArbitrageBot:
         self.shutdown_event = asyncio.Event()
 
         # Persistent WebSocket orderbook cache: {(exchange, symbol): EnhancedOrderBook}
+        # Note: dict[key] assignment is atomic within asyncio's single-threaded event loop
+        # (no preemptive context switch during assignment), so no lock is needed.
         self._latest_orderbooks = {}
-        # Lock protecting _latest_orderbooks writes (reads of individual keys are safe
-        # since dict[key] assignment is atomic, but we guard multi-step operations)
-        self._orderbook_lock = asyncio.Lock()
         # Event fired when any orderbook updates for a given symbol: {symbol: asyncio.Event}
         self._orderbook_events = {}
 
-        # Tracking (protected by GIL for simple increments, but we use a lock
-        # for the compound read-modify-write in state updates)
-        self._counter_lock = asyncio.Lock()
+        # Tracking
         self.opportunities_detected = 0
         self.opportunities_scored = 0
         self.opportunities_executed = 0
@@ -395,9 +392,8 @@ class AdvancedArbitrageBot:
                     asks=[(Decimal(str(p)), Decimal(str(v))) for p, v in ob_data['asks'][:20]]
                 )
 
-                # Store in-memory under lock for safe concurrent access
-                async with self._orderbook_lock:
-                    self._latest_orderbooks[(exchange_name, symbol)] = orderbook
+                # Store in-memory (atomic within asyncio's single-threaded event loop)
+                self._latest_orderbooks[(exchange_name, symbol)] = orderbook
 
                 # Update price history for cointegration analysis
                 self.advanced_engine.update_price_history(
@@ -1054,28 +1050,35 @@ class AdvancedArbitrageBot:
                 if adaptations:
                     logger.info(f"🔄 Antifragile adaptations proposed: {adaptations}")
 
-                    # Update config with new parameters, enforcing safety bounds
-                    # to prevent the adaptation from bypassing __post_init__ validation
-                    SAFETY_BOUNDS = {
-                        'max_position_usd': (1.0, self.config.trading.MAX_ALLOWED_POSITION_USD),
-                        'min_spread_percent': (self.config.trading.MIN_ALLOWED_SPREAD_PERCENT, 100.0),
-                        'max_daily_loss_usd': (1.0, self.config.trading.MAX_ALLOWED_DAILY_LOSS_USD),
-                        'max_slippage_bps': (1, 500),
-                    }
+                    # Only allow mutation of tunable runtime parameters
+                    # (never mode, never the CLASS-LEVEL safety constants)
+                    TUNABLE_PARAMS = frozenset({
+                        'min_spread_percent', 'max_spread_percent',
+                        'max_position_usd', 'max_daily_loss_usd',
+                        'max_daily_trades', 'order_timeout_seconds',
+                        'max_slippage_bps',
+                    })
                     for param, value in adaptations.items():
-                        if not hasattr(self.config.trading, param):
+                        if param not in TUNABLE_PARAMS:
+                            logger.warning(
+                                f"Antifragile adaptation rejected: '{param}' is not a tunable parameter"
+                            )
                             continue
-                        bounds = SAFETY_BOUNDS.get(param)
-                        if bounds:
-                            lo, hi = bounds
-                            if value < lo or value > hi:
-                                logger.warning(
-                                    f"Antifragile adaptation rejected: {param}={value} "
-                                    f"outside safety bounds [{lo}, {hi}]"
-                                )
-                                continue
+
+                        # Snapshot current value so we can rollback on validation failure
+                        old_value = getattr(self.config.trading, param)
                         setattr(self.config.trading, param, value)
-                        logger.info(f"  Applied: {param} = {value}")
+                        try:
+                            # Re-run the full validation that __post_init__ performs
+                            self.config.trading.__post_init__()
+                            logger.info(f"  Applied: {param} = {value}")
+                        except Exception as validation_err:
+                            # Rollback to previous value
+                            setattr(self.config.trading, param, old_value)
+                            logger.warning(
+                                f"Antifragile adaptation rejected: {param}={value} "
+                                f"failed validation: {validation_err}"
+                            )
 
                 # Run stress test periodically
                 stress_results = await self.antifragile.run_stress_test()
