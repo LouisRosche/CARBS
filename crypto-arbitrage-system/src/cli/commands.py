@@ -710,11 +710,16 @@ Examples:
         print("\n(Full report saved to data/backtest_results.json)")
 
 
-async def main():
-    """CLI entry point"""
+async def _async_main():
+    """Async CLI entry point"""
     handler = CommandHandler()
     await handler.handle()
 
 
+def main():
+    """CLI entry point (sync wrapper for console_scripts)"""
+    asyncio.run(_async_main())
+
+
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()

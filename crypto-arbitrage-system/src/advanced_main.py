@@ -807,58 +807,69 @@ class AdvancedArbitrageBot:
                 # Use explicit transaction to ensure atomicity —
                 # if execution INSERT fails, opportunity INSERT is rolled back too
                 async with conn.transaction():
-                    # Insert opportunity
+                    # Insert opportunity (matches opportunities schema in models.py)
+                    spread_bps = Decimal(str(opportunity['spread_percent'])) * 100
+                    quantity = Decimal(str(opportunity['position_size'])) / Decimal(str(opportunity['buy_price']))
                     opp_id = await conn.fetchval("""
                     INSERT INTO opportunities
-                    (detected_at, buy_exchange, sell_exchange, symbol,
-                     buy_price, sell_price, spread_percent, spread_bps,
-                     potential_profit_usd, estimated_profit_after_fees,
-                     buy_fee_percent, sell_fee_percent, slippage_estimate, executed)
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+                    (symbol, buy_exchange, sell_exchange,
+                     buy_price, sell_price, spread_bps,
+                     available_quantity, score, executed, discovered_at,
+                     metadata)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
                     RETURNING id
                 """,
-                    datetime.now(timezone.utc),
+                    opportunity['symbol'],
                     opportunity['buy_exchange'],
                     opportunity['sell_exchange'],
-                    opportunity['symbol'],
-                    float(opportunity['buy_price']),
-                    float(opportunity['sell_price']),
-                    float(opportunity['spread_percent']),
-                    float(opportunity['spread_percent'] * 100),
-                    float(opportunity['position_size'] * opportunity['net_spread']),
-                    float(result.net_profit),
-                    float(opportunity['buy_fee'] * 100),
-                    float(opportunity['sell_fee'] * 100),
-                    float((opportunity['buy_slippage'] + opportunity['sell_slippage']) * 100),
-                    True
+                    Decimal(str(opportunity['buy_price'])),
+                    Decimal(str(opportunity['sell_price'])),
+                    spread_bps,
+                    quantity,
+                    Decimal(str(score.composite_score)),
+                    True,
+                    datetime.now(timezone.utc),
+                    json.dumps({
+                        'buy_fee_percent': str(opportunity['buy_fee'] * 100),
+                        'sell_fee_percent': str(opportunity['sell_fee'] * 100),
+                        'slippage_estimate': str((opportunity['buy_slippage'] + opportunity['sell_slippage']) * 100),
+                        'net_spread': str(opportunity['net_spread']),
+                    })
                 )
 
-                # Insert execution
-                await conn.execute("""
-                    INSERT INTO executions
-                    (opportunity_id, started_at, completed_at, status, execution_time_ms,
-                     buy_exchange, buy_filled_amount, buy_avg_price, buy_fee,
-                     sell_exchange, sell_filled_amount, sell_avg_price, sell_fee,
-                     gross_profit_usd, net_profit_usd, profit_percent)
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
-                """,
-                    opp_id,
-                    result.buy_order.created_at,
-                    result.buy_order.updated_at,
-                    'completed',
-                    result.execution_time_ms,
-                    opportunity['buy_exchange'],
-                    float(result.buy_order.filled_amount),
-                    float(result.buy_order.avg_fill_price),
-                    float(result.buy_order.fee),
-                    opportunity['sell_exchange'],
-                    float(result.sell_order.filled_amount),
-                    float(result.sell_order.avg_fill_price),
-                    float(result.sell_order.fee),
-                    float(result.gross_profit),
-                    float(result.net_profit),
-                    float(opportunity['spread_percent'])
-                )
+                    # Insert execution (matches arbitrage_executions schema in models.py)
+                    buy_fee = Decimal(str(result.buy_order.fee))
+                    sell_fee = Decimal(str(result.sell_order.fee))
+                    await conn.execute("""
+                        INSERT INTO arbitrage_executions
+                        (symbol, buy_exchange, sell_exchange,
+                         buy_price, sell_price, spread_bps,
+                         quantity, gross_profit, total_fees, net_profit,
+                         success, total_execution_time_ms,
+                         completed_at, opportunity_id, metadata)
+                        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14::text, $15)
+                    """,
+                        opportunity['symbol'],
+                        opportunity['buy_exchange'],
+                        opportunity['sell_exchange'],
+                        Decimal(str(result.buy_order.avg_fill_price)),
+                        Decimal(str(result.sell_order.avg_fill_price)),
+                        spread_bps,
+                        Decimal(str(result.buy_order.filled_amount)),
+                        Decimal(str(result.gross_profit)),
+                        buy_fee + sell_fee,
+                        Decimal(str(result.net_profit)),
+                        True,
+                        result.execution_time_ms,
+                        datetime.now(timezone.utc),
+                        str(opp_id),
+                        json.dumps({
+                            'buy_filled_amount': str(result.buy_order.filled_amount),
+                            'sell_filled_amount': str(result.sell_order.filled_amount),
+                            'buy_fee': str(result.buy_order.fee),
+                            'sell_fee': str(result.sell_order.fee),
+                        })
+                    )
 
         except Exception as e:
             # Database persistence failure is serious - log with full context for investigation
