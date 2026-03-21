@@ -11,7 +11,7 @@ Follows principle of least privilege
 
 import logging
 from enum import Enum, auto
-from typing import Set, Dict, Optional, List
+from typing import Set, Dict, Optional
 from dataclasses import dataclass
 from functools import wraps
 

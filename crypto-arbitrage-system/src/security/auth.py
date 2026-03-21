@@ -16,6 +16,7 @@ import secrets
 import hashlib
 import logging
 import functools
+from pathlib import Path
 from typing import Optional, Dict, Any, Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone, timedelta
@@ -33,19 +34,31 @@ logger = logging.getLogger(__name__)
 
 def _get_user_data_key() -> bytes:
     """
-    Derive encryption key for user data from master key or generate a stable one.
-    Uses PBKDF2 with a fixed salt for reproducibility.
+    Derive encryption key for user data from master key.
+    Requires CARBS_MASTER_KEY or CARBS_JWT_SECRET to be set.
     """
+    import base64
+
     master_key = os.getenv('CARBS_MASTER_KEY', os.getenv('CARBS_JWT_SECRET', ''))
     if not master_key:
-        # Generate a stable key based on machine-specific info
-        import socket
-        machine_id = f"carbs-{socket.gethostname()}-user-data"
-        master_key = machine_id
-        logger.warning("No CARBS_MASTER_KEY set. Using machine-based key for user data encryption.")
+        raise AuthError(
+            "CARBS_MASTER_KEY environment variable is required for user data encryption. "
+            "Generate one with: python -c \"import secrets; print(secrets.token_urlsafe(32))\" "
+            "and set it in your .env file."
+        )
 
-    # Fixed salt for user data encryption (reproducibility required)
-    salt = b'CARBS_USER_DATA_ENCRYPTION_SALT_'
+    salt = os.getenv('CARBS_KEY_SALT', '').encode() or os.urandom(32)
+    # Persist generated salt for reproducibility
+    salt_file = Path('data/.key_salt')
+    if os.getenv('CARBS_KEY_SALT'):
+        salt = os.getenv('CARBS_KEY_SALT').encode()
+    elif salt_file.exists():
+        salt = salt_file.read_bytes()
+    else:
+        salt = os.urandom(32)
+        salt_file.parent.mkdir(parents=True, exist_ok=True)
+        salt_file.write_bytes(salt)
+        os.chmod(salt_file, 0o600)
 
     kdf = PBKDF2HMAC(
         algorithm=hashes.SHA256(),
@@ -55,7 +68,6 @@ def _get_user_data_key() -> bytes:
         backend=default_backend()
     )
 
-    import base64
     return base64.urlsafe_b64encode(kdf.derive(master_key.encode()))
 
 
@@ -665,6 +677,10 @@ class AuthenticationManager:
             payload = jwt.decode(token, self._jwt_secret, algorithms=['HS256'])
             session_id = payload.get('session_id')
 
+            # Validate JWT claim types to prevent type confusion attacks
+            if not isinstance(session_id, str) or not session_id:
+                raise TokenError("Invalid session_id in token")
+
             if session_id not in self._sessions:
                 raise TokenError("Session not found")
 
@@ -701,6 +717,10 @@ class AuthenticationManager:
         try:
             payload = jwt.decode(token, self._jwt_secret, algorithms=['HS256'])
             session_id = payload.get('session_id')
+
+            # Validate JWT claim types to prevent type confusion attacks
+            if not isinstance(session_id, str) or not session_id:
+                raise TokenError("Invalid session_id in token")
 
             # Check token blacklist (Redis) for immediate revocation
             if self._token_blacklist:

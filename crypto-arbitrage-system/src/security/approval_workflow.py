@@ -267,23 +267,61 @@ class ApprovalWorkflowEngine:
         )
         return hashlib.sha256(content.encode()).hexdigest()
 
+    # Whitelist of modifiable rule fields with their expected types and constraints
+    _ALLOWED_RULE_FIELDS: Dict[str, type] = {
+        'required_approvers': int,
+        'required_roles': list,
+        'time_delay_minutes': int,
+        'expiry_minutes': int,
+        'allow_self_approval': bool,
+        'require_2fa': bool,
+        'require_reason': bool,
+        'threshold_usd': float,
+    }
+
     def configure_rule(
         self,
         approval_type: ApprovalType,
         **kwargs
     ):
         """
-        Configure approval rule for an operation type
+        Configure approval rule for an operation type.
+
+        Only whitelisted fields can be modified. Values are type-checked
+        and validated to prevent approval bypass attacks.
 
         Args:
             approval_type: Type of operation
-            **kwargs: Rule parameters to override
+            **kwargs: Rule parameters to override (must be in whitelist)
+
+        Raises:
+            ValueError: If a field is not allowed or fails validation
         """
+        # Validate all kwargs before applying any changes
+        for key, value in kwargs.items():
+            if key == 'approval_type':
+                raise ValueError("Cannot modify approval_type after creation")
+            if key not in self._ALLOWED_RULE_FIELDS:
+                raise ValueError(f"Field '{key}' is not a configurable rule parameter")
+            expected_type = self._ALLOWED_RULE_FIELDS[key]
+            if value is not None and not isinstance(value, expected_type):
+                raise ValueError(
+                    f"Field '{key}' must be {expected_type.__name__}, "
+                    f"got {type(value).__name__}"
+                )
+
+        # Enforce safety invariants
+        if 'required_approvers' in kwargs and kwargs['required_approvers'] < 1:
+            raise ValueError("required_approvers must be >= 1")
+        if 'time_delay_minutes' in kwargs and kwargs['time_delay_minutes'] < 0:
+            raise ValueError("time_delay_minutes must be >= 0")
+        if 'expiry_minutes' in kwargs and kwargs['expiry_minutes'] < 1:
+            raise ValueError("expiry_minutes must be >= 1")
+
         if approval_type in self._rules:
             rule = self._rules[approval_type]
             for key, value in kwargs.items():
-                if hasattr(rule, key):
-                    setattr(rule, key, value)
+                setattr(rule, key, value)
         else:
             self._rules[approval_type] = ApprovalRule(
                 approval_type=approval_type,
@@ -682,6 +720,7 @@ class TradeApprovalMiddleware:
         self.workflow = workflow_engine
         self.threshold_usd = threshold_usd
         self._approved_trade_ids: Dict[str, datetime] = {}
+        self._approval_lock = asyncio.Lock()
 
     async def check_trade_approval(
         self,
@@ -692,23 +731,31 @@ class TradeApprovalMiddleware:
         trade_details: Dict
     ) -> tuple:
         """
-        Check if trade requires approval and if it's approved
+        Check if trade requires approval and if it's approved.
+
+        Uses a lock to prevent TOCTOU race conditions — the approval check
+        and consumption are atomic.
 
         Returns:
             (can_execute: bool, message: str, request_id: Optional[str])
         """
-        # Check if below threshold
+        # Below-threshold trades don't need the lock
         if trade_value_usd < self.threshold_usd:
             return True, "Trade below approval threshold", None
 
-        # Check if already approved
-        if trade_id in self._approved_trade_ids:
-            approval_time = self._approved_trade_ids[trade_id]
-            # Approval valid for 5 minutes
-            if datetime.now(timezone.utc) - approval_time < timedelta(minutes=5):
-                return True, "Trade pre-approved", None
+        async with self._approval_lock:
+            # Atomically check and consume approval
+            if trade_id in self._approved_trade_ids:
+                approval_time = self._approved_trade_ids[trade_id]
+                if datetime.now(timezone.utc) - approval_time < timedelta(minutes=5):
+                    # Consume the approval so it can't be reused
+                    del self._approved_trade_ids[trade_id]
+                    return True, "Trade pre-approved", None
+                else:
+                    # Expired — clean up stale entry
+                    del self._approved_trade_ids[trade_id]
 
-        # Create approval request
+        # Create approval request (outside lock to avoid holding it during I/O)
         request = await self.workflow.create_request(
             approval_type=ApprovalType.LARGE_TRADE,
             requester_id=trader_id,
@@ -723,9 +770,10 @@ class TradeApprovalMiddleware:
 
         return False, f"Approval required. Request ID: {request.request_id}", request.request_id
 
-    def mark_trade_approved(self, trade_id: str):
-        """Mark a trade as approved for execution"""
-        self._approved_trade_ids[trade_id] = datetime.now(timezone.utc)
+    async def mark_trade_approved(self, trade_id: str):
+        """Mark a trade as approved for execution (thread-safe)."""
+        async with self._approval_lock:
+            self._approved_trade_ids[trade_id] = datetime.now(timezone.utc)
 
         # Cleanup old approvals
         cutoff = datetime.now(timezone.utc) - timedelta(hours=1)
